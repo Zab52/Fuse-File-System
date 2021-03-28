@@ -285,7 +285,7 @@ static int alloc_root_dir() {
 static void release_inode(struct refs_inode *ino) {
 	assert(ino->flags & INODE_IN_USE);
 	assert(ino->n_links == 0);
-	
+
 	ino->flags = INODE_FREE;
 	ino->n_links = 0;
 	ino->size = 0;
@@ -355,14 +355,14 @@ static void* refs_init(struct fuse_conn_info *conn) {
 		// system" to start from, so we initialize one from scratch.
 		// Typically, a separate program would do this (e.g., mkfs)
 		// but this is not a typical file system...
-		
+
 		printf("creating new disk\n");
-		
+
 		// First, create a new "disk" file from scratch
 		disk_fd = open(DISK_PATH, O_CREAT | O_EXCL | O_SYNC | O_RDWR,
 			       S_IRUSR | S_IWUSR);
 		assert(disk_fd > 0);
-		
+
 
 		// extend our "disk" file to 10 MiB (per lab spec)
 		ret = ftruncate(disk_fd, 10*1024*1024);
@@ -370,25 +370,25 @@ static void* refs_init(struct fuse_conn_info *conn) {
 
 		// now initialize the "empty" state of all of our data
 		// structures in memory, then write that state to disk
-		
+
 		init_super(&super.super);
 		dump_super(&super.super);
 
 		inode_bitmap = allocate_bitmap(super.super.num_inodes);
 		assert(inode_bitmap != NULL);
-		
+
 		data_bitmap = allocate_bitmap(super.super.num_data_blocks);
 		assert(inode_bitmap != NULL);
 
 		// allocate our inode table memory and populate initial vals
 		alloc_inode_table(DEFAULT_NUM_INODES);
-		
+
 		// allocate inode for `/`, create the directory with . and ..
 		alloc_root_dir();
-		
+
 		// write superblock
 		write_super();
-		
+
 		// done! now we have all of our metadata initialized and
 		// written, and we can reinitialize our file system from
 		// this on-disk state in future runs.
@@ -399,40 +399,40 @@ static void* refs_init(struct fuse_conn_info *conn) {
 		// off.
 
 		// Step 1: open disk and read the superblock
-		
+
 		// Since super is statically allocated, we don't need
 		// to do any memory allocation with malloc; we just
 		// need to populate its contents by reading them from
 		// "disk".  And since we need to access fields in our
 		// super in order to know the sizes of our other
 		// metadata structures, we read super first.
-		
+
 		disk_fd = open(DISK_PATH, O_SYNC | O_RDWR);
 		assert(disk_fd > 0);
-		
+
 		// read superblock
 		ret = read_block(&super, 0);
 		dump_super(&super.super);
 
-		
+
 		// Step 2: allocate our other data structures in memory
 		// and read from "disk" to populate your data structures
 
 		// bitmaps
 		inode_bitmap = allocate_bitmap(super.super.num_inodes);
 		assert(inode_bitmap != NULL);
-		
+
 		data_bitmap = allocate_bitmap(super.super.num_data_blocks);
 		assert(inode_bitmap != NULL);
 
 		read_bitmap_from_disk(inode_bitmap,
 				      super.super.i_bitmap_start);
 		dump_bitmap(inode_bitmap);
-		
+
 		read_bitmap_from_disk(data_bitmap,
 				      super.super.d_bitmap_start);
 		dump_bitmap(data_bitmap);
-		
+
 		//inode table
 		alloc_inode_table(super.super.num_inodes);
 		ret = read_blocks(inode_table,
@@ -449,12 +449,46 @@ static void* refs_init(struct fuse_conn_info *conn) {
 	return NULL;
 }
 
+static void refs_destroy(struct fuse_conn_info *conn){
+	// Need to:
+  // deallocate memory
+
+	free(inode_table);
+	free_bitmap(inode_bitmap);
+	free_bitmap(data_bitmap);
+
+	close(disk_fd);
+
+}
+
+static int refs_getattr(const char * path, struct stat* stbuf){
+
+	memset(stbuf, 0, sizeof(struct stat));
+
+	struct refs_superblock * sb = &super.super;
+
+	union inode * temp;
+	struct refs_indode * ind;
+
+	for(int i = 0; i< sb->num_inodes; i++){
+		if(get_bit((struct bitmap*)sb->i_bitmap_start, i)){
+			temp = (union inode *)sb->i_table_start + i;
+			ind = &temp.inode;
+
+		}
+
+	}
+
+	return 0;
+}
+
 // You should implement the functions that you need, but do so in a
 // way that lets you incrementally test.
 static struct fuse_operations refs_operations = {
 	.init		= refs_init,
+	.destroy = refs_destroy,
+	.getattr	= refs_getattr,
 /*
-	.getattr	= NULL,
 	.fgetattr	= NULL,
 	.access		= NULL,
 	.readlink	= NULL,
