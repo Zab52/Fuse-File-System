@@ -461,6 +461,55 @@ static void refs_destroy(struct fuse_conn_info *conn){
 
 }
 
+static int lookForSlash(char *str, char *buf) {
+	for (int i = 0; i < strlen(str); i++) {
+		if (*(str + i) == '/') {
+			strncpy(buf, str, i);
+			return i + 1;
+		}
+	}
+	strcpy(buf, str);
+	return strlen(str);
+}
+
+struct dir_entry searchForDir(struct refs_inode *ino, char *search) {
+	for (int i = 0; i < ino->size; i++) {
+		struct directory_block *blk = (struct directory_block*) ino->block_ptrs[i];
+		for (int j = 0; j < DIRENTS_PER_BLOCK; j++) {
+			struct dir_entry *dir = blk->dirents + j;
+			if (dir->is_valid && strcmp(dir->path, search)) {
+				return *dir;
+			}
+		}
+	}
+	return NULL;
+}
+
+static refs_inode getattr_search(const char *path,
+			   struct refs_inode *begin) {
+	if (strlen(path) == 0) {
+		return begin;
+	}
+	
+	if (begin->flags & INODE_TYPE_REG) {
+		return NULL;
+	}
+	
+	struct refs_superblock * sb = &super.super;
+	
+	char *toSearch;
+	int ind = lookForSlash(path, toSearch);
+	
+	struct dir_entry dir = searchForDir(begin, toSearch);
+	if (dir == NULL) {
+		return NULL;
+	}
+	
+	union inode *tmp = ((union inode*) (sb->i_table_start)) + dir.inum;
+	struct refs_inode *child = &(tmp->inode);
+	return getattr_search(path + ind, child);
+}
+
 static int refs_getattr(const char * path, struct stat* stbuf){
 
 	memset(stbuf, 0, sizeof(struct stat));
@@ -469,7 +518,16 @@ static int refs_getattr(const char * path, struct stat* stbuf){
 
 	union inode * temp;
 	struct refs_indode * ind;
+	
+	temp = (union inode *)sb->i_table_start;
+	ind = &temp->inode;
+	struct refs_inode *res = getattr_search(path + 1, ind);
+	if (res == NULL) {
+		return 1;
+	}
+	return 0;
 
+	/*
 	for(int i = 0; i< sb->num_inodes; i++){
 		if(get_bit((struct bitmap*)sb->i_bitmap_start, i)){
 			temp = (union inode *)sb->i_table_start + i;
@@ -478,8 +536,7 @@ static int refs_getattr(const char * path, struct stat* stbuf){
 		}
 
 	}
-
-	return 0;
+	*/
 }
 
 // You should implement the functions that you need, but do so in a
