@@ -266,6 +266,7 @@ static int alloc_root_dir() {
 	inode_table[inum].inode.size = 4096;
 	inode_table[inum].inode.blocks = 1;
 	inode_table[inum].inode.block_ptrs[0] = data_lba;
+	inode_table[inum].inode.permissions = 664;
 
 	// write the directory contents to its data block
 	write_block(root_data, data_lba);
@@ -450,8 +451,6 @@ static void* refs_init(struct fuse_conn_info *conn) {
 }
 
 static void refs_destroy(struct fuse_conn_info *conn){
-	// Need to:
-  // deallocate memory
 
 	free(inode_table);
 	free_bitmap(inode_bitmap);
@@ -472,40 +471,45 @@ static int lookForSlash(char *str, char *buf) {
 	return strlen(str);
 }
 
-struct dir_entry searchForDir(struct refs_inode *ino, char *search) {
+struct dir_entry * searchForDir(struct refs_inode *ino, char *search) {
+	union directory_block *blk = malloc(sizeof(block));
 	for (int i = 0; i < ino->size; i++) {
-		struct directory_block *blk = (struct directory_block*) ino->block_ptrs[i];
+		(union directory_block*) read_block(ino->block_ptrs[i]);
 		for (int j = 0; j < DIRENTS_PER_BLOCK; j++) {
 			struct dir_entry *dir = blk->dirents + j;
-			if (dir->is_valid && strcmp(dir->path, search)) {
-				return *dir;
+			if (dir != NULL && dir->is_valid){
+				printf("Here: %s\n", search);
+				printf("%s\n", dir->path);
+				if (dir->is_valid && !strcmp(dir->path, search)) {
+					return dir;
+				}
 			}
 		}
 	}
 	return NULL;
 }
 
-static refs_inode getattr_search(const char *path,
+struct refs_inode * getattr_search(char *path,
 			   struct refs_inode *begin) {
 	if (strlen(path) == 0) {
 		return begin;
 	}
-	
+
 	if (begin->flags & INODE_TYPE_REG) {
 		return NULL;
 	}
-	
+
 	struct refs_superblock * sb = &super.super;
-	
-	char *toSearch;
+
+	char toSearch[MAX_PATH_LEN];
 	int ind = lookForSlash(path, toSearch);
-	
-	struct dir_entry dir = searchForDir(begin, toSearch);
+
+	struct dir_entry * dir = searchForDir(begin, toSearch);
 	if (dir == NULL) {
 		return NULL;
 	}
-	
-	union inode *tmp = ((union inode*) (sb->i_table_start)) + dir.inum;
+
+	union inode *tmp = ((union inode*) (inode_table)) + dir->inum;
 	struct refs_inode *child = &(tmp->inode);
 	return getattr_search(path + ind, child);
 }
@@ -518,13 +522,29 @@ static int refs_getattr(const char * path, struct stat* stbuf){
 
 	union inode * temp;
 	struct refs_indode * ind;
-	
-	temp = (union inode *)sb->i_table_start;
+
+	temp = (union inode *) inode_table;
 	ind = &temp->inode;
 	struct refs_inode *res = getattr_search(path + 1, ind);
 	if (res == NULL) {
 		return 1;
 	}
+
+	stbuf->st_nlink = res->n_links;
+	stbuf->st_blocks = res->blocks;
+
+	if(res->flags & INODE_TYPE_DIR){
+		stbuf->st_mode = res->permissions | S_IFDIR;
+	} else if (res->flags & INODE_TYPE_REG){
+		stbuf->st_mode = res->permissions | S_IFREG;
+	} else{
+		printf("Unknown File type");
+	}
+
+	stbuf->st_size = res->size;
+	stbuf->st_dev = 0x1234;
+	stbuf->st_ino = res->inum;
+
 	return 0;
 
 	/*

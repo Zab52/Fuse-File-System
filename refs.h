@@ -66,6 +66,7 @@ union superblock {
  */
 struct refs_inode {
 	char flags;
+  uint16_t permissions;
 	uint16_t n_links;
 	uint64_t inum;
 	uint64_t size;
@@ -97,7 +98,7 @@ struct dir_entry {
 
 #define DIRENT_SIZE 64
 #define DIRENTS_PER_BLOCK ((BLOCK_SIZE) / (DIRENT_SIZE))
-	
+
 
 
 /*
@@ -132,7 +133,7 @@ union inode {
 	char pad[INODE_SIZE];
 };
 
-/* 
+/*
  * Runtime check to make sure our INODE_SIZE evenly divides our BLOCK_SIZE
  * so that our inode table is block-aligned.
  * 2 parts: (a) our "padded size" is at least as large as the C struct
@@ -143,7 +144,7 @@ union inode {
 	       && ((BLOCK_SIZE) % (INODE_SIZE) == 0))
 
 
-/** 
+/**
  * Some default values. Ideally, these would not be hard-coded,
  *  but this simplifies our design. You can change these as you
  *  add functionality or resize your disk.
@@ -164,7 +165,7 @@ struct bitmap {
 	// the number of bytes in the bitmap (not bits!)
 	// Note: the bitmap must be padded to a multiple of BLOCK_SIZE
 	uint64_t n_bytes;
-	
+
 	// Due to padding, the number of valid bits may be significantly
 	// less than the number of bits that the bitmap *COULD* represent
 	uint64_t n_valid_bits;
