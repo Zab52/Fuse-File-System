@@ -266,7 +266,7 @@ static int alloc_root_dir() {
 	inode_table[inum].inode.size = 4096;
 	inode_table[inum].inode.blocks = 1;
 	inode_table[inum].inode.block_ptrs[0] = data_lba;
-	inode_table[inum].inode.permissions = 664;
+	inode_table[inum].inode.permissions = 0664;
 
 	// write the directory contents to its data block
 	write_block(root_data, data_lba);
@@ -472,20 +472,20 @@ static int lookForSlash(char *str, char *buf) {
 }
 
 struct dir_entry * searchForDir(struct refs_inode *ino, char *search) {
-	union directory_block *blk = malloc(sizeof(block));
+	union directory_block *blk = malloc(sizeof(union directory_block));
 	for (int i = 0; i < ino->size; i++) {
-		(union directory_block*) read_block(ino->block_ptrs[i]);
+		read_block(blk, ino->block_ptrs[i]);
 		for (int j = 0; j < DIRENTS_PER_BLOCK; j++) {
 			struct dir_entry *dir = blk->dirents + j;
 			if (dir != NULL && dir->is_valid){
-				printf("Here: %s\n", search);
-				printf("%s\n", dir->path);
 				if (dir->is_valid && !strcmp(dir->path, search)) {
+					free(blk);
 					return dir;
 				}
 			}
 		}
 	}
+	free(blk);
 	return NULL;
 }
 
@@ -527,7 +527,7 @@ static int refs_getattr(const char * path, struct stat* stbuf){
 	ind = &temp->inode;
 	struct refs_inode *res = getattr_search(path + 1, ind);
 	if (res == NULL) {
-		return 1;
+		return -ENOENT;
 	}
 
 	stbuf->st_nlink = res->n_links;
@@ -559,12 +559,68 @@ static int refs_getattr(const char * path, struct stat* stbuf){
 	*/
 }
 
+static int refs_access(const char *path, int mask){
+
+	struct stat perm;
+
+	refs_getattr(path, &perm);
+
+	if(mask & (perm.st_mode >> 6)){
+		return 0;
+	}
+
+	return -1;
+}
+
+static int refs_mkdir(const char* path, mode_t mode){
+
+	int i =0;
+	int lastSlash = 0;
+	while (*(path + i) != '\0'){
+		if(*(path + i) == '/'){
+			lastSlash = i;
+		}
+		i++;
+	}
+
+	char * start = (char *) calloc(sizeof(char), lastSlash+1);
+
+	strncpy(start, path, lastSlash);
+
+	start[lastSlash] = '\0';
+
+	union inode * temp;
+	struct refs_indode * ind;
+
+	temp = (union inode *) inode_table;
+	ind = &temp->inode;
+	struct refs_inode *res = getattr_search(start + 1, ind);
+
+	if(res == NULL){
+		return -1;
+	}
+
+	if(refs_access(start, W_OK)){
+		return -EACCES;
+	}
+
+	if(searchForDir(res, path+i+1) != NULL){
+		return -EEXIST;
+	}
+
+	return 0;
+}
+
+
+
 // You should implement the functions that you need, but do so in a
 // way that lets you incrementally test.
 static struct fuse_operations refs_operations = {
 	.init		= refs_init,
 	.destroy = refs_destroy,
 	.getattr	= refs_getattr,
+	.access = refs_access,
+	.mkdir = refs_mkdir,
 /*
 	.fgetattr	= NULL,
 	.access		= NULL,
