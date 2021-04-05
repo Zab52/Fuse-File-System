@@ -499,8 +499,6 @@ struct refs_inode * getattr_search(char *path,
 		return NULL;
 	}
 
-	struct refs_superblock * sb = &super.super;
-
 	char toSearch[MAX_PATH_LEN];
 	int ind = lookForSlash(path, toSearch);
 
@@ -518,14 +516,14 @@ static int refs_getattr(const char * path, struct stat* stbuf){
 
 	memset(stbuf, 0, sizeof(struct stat));
 
-	struct refs_superblock * sb = &super.super;
-
 	union inode * temp;
-	struct refs_indode * ind;
+	struct refs_inode * ind;
 
 	temp = (union inode *) inode_table;
-	ind = &temp->inode;
-	struct refs_inode *res = getattr_search(path + 1, ind);
+	ind = &(temp->inode);
+	char * path2 = (char *) path;
+
+	struct refs_inode *res = getattr_search(path2 + 1, ind);
 	if (res == NULL) {
 		return -ENOENT;
 	}
@@ -590,7 +588,7 @@ static int refs_mkdir(const char* path, mode_t mode){
 	start[lastSlash] = '\0';
 
 	union inode * temp;
-	struct refs_indode * ind;
+	struct refs_inode * ind;
 
 	temp = (union inode *) inode_table;
 	ind = &temp->inode;
@@ -604,9 +602,13 @@ static int refs_mkdir(const char* path, mode_t mode){
 		return -EACCES;
 	}
 
-	if(searchForDir(res, path+i+1) != NULL){
+	char * path2 = (char *) path;
+
+	if(searchForDir(res, path2+i+1) != NULL){
 		return -EEXIST;
 	}
+
+	int inum = reserve_dir_inode();
 
 	return 0;
 }
