@@ -538,7 +538,7 @@ static int refs_getattr(const char * path, struct stat* stbuf){
 	} else if (res->flags & INODE_TYPE_REG){
 		stbuf->st_mode = res->permissions | S_IFREG;
 	} else{
-		printf("Unknown File type");
+		printf("Unknown File type\n");
 	}
 
 	stbuf->st_size = res->size;
@@ -611,6 +611,55 @@ static int refs_mkdir(const char* path, mode_t mode){
 	return 0;
 }
 
+static int refs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
+			 off_t offset, struct fuse_file_info *fi) {
+	
+	union inode *temp = (union inode *) inode_table;
+	struct refs_inode *ind = &temp->inode;
+	struct refs_inode *res = getattr_search(path + 1, ind);
+	
+	if(res == NULL){
+		return -ENOENT;
+	}
+	
+	off_t num = offset;
+	int i_start = offset / res->size;
+	int pathlen = strlen(path);
+	
+	union directory_block *blk = malloc(sizeof(union directory_block));
+	for (int i = i_start; i < res->size; i++) {
+		read_block(blk, res->block_ptrs[i]);
+		int j_start = 0;
+		if (i == i_start) {
+			j_start = offset % res->size;
+		}
+		for (int j = j_start; j < DIRENTS_PER_BLOCK; j++) {
+			struct dir_entry *dir = blk->dirents + j;
+			if (dir->is_valid && num > offset) {
+				int subpathlen = strlen(dir->path);
+				
+				char *appendedFilename = malloc(sizeof(char) * (pathlen + subpathlen + 1));
+				strncpy(appendedFilename, path, pathlen);
+				strncpy(appendedFilename + pathlen, "/", 1);
+				strncpy(appendedFilename + pathlen + 1, dir->path, subpathlen);
+				
+				struct stat info;
+				refs_getattr(appendedFilename, &info);
+				
+				if (filler(buf, appendedFilename, &info, num + 1)) {
+					free(appendedFilename);
+					return 0;
+				}
+				
+				free(appendedFilename);
+			}
+			num++;
+		}
+	}
+	return 0;
+	
+}
+
 
 
 // You should implement the functions that you need, but do so in a
@@ -621,11 +670,11 @@ static struct fuse_operations refs_operations = {
 	.getattr	= refs_getattr,
 	.access = refs_access,
 	.mkdir = refs_mkdir,
+	.readdir	= refs_readdir
 /*
 	.fgetattr	= NULL,
 	.access		= NULL,
 	.readlink	= NULL,
-	.readdir	= NULL,
 	.mknod		= NULL,
 	.create		= NULL,
 	.mkdir		= NULL,
