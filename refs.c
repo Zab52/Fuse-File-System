@@ -19,6 +19,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <sys/time.h>
+#include <libgen.h>
 #ifdef HAVE_SETXATTR
 #include <sys/xattr.h>
 #endif
@@ -512,20 +513,84 @@ struct refs_inode * getattr_search(char *path,
 	return getattr_search(path + ind, child);
 }
 
+int find_child_inum(char * path, struct refs_inode* ino){
+	union directory_block * blk = malloc(sizeof(union directory_block));
+	for (int i = 0; i < ino->size; i++) {
+		read_block(blk, ino->block_ptrs[i]);
+		for (int j = 0; j < DIRENTS_PER_BLOCK; j++) {
+			struct dir_entry *dir = &blk->dirents[j];
+			if (dir != NULL && dir->is_valid){
+				if (!strcmp(dir->path, path)) {
+					free(blk);
+					return dir->inum;
+				}
+			}
+		}
+	}
+	free(blk);
+	return -1;
+}
+
+int get_parent_inum(char * path){
+	struct refs_inode * current;
+
+	char * dup = malloc(sizeof(char) * strlen(path));
+
+	char * parentPath = dirname(dup);
+
+  char delem[2] = "/";
+
+	char * temp = strtok(parentPath, delem);
+	int inum = 0;
+
+	while(temp != NULL){
+		current = (struct refs_inode *) &(inode_table[inum]).inode;
+
+		inum = find_child_inum(temp, current);
+		if(inum == -1){
+			free(dup);
+			return -1;
+		}
+
+		temp = strtok(NULL, delem);
+	}
+
+	free(dup);
+	return inum;
+}
+
 static int refs_getattr(const char * path, struct stat* stbuf){
 
-	memset(stbuf, 0, sizeof(struct stat));
+	char * dup = malloc(sizeof(char) * strlen(path));
 
-	union inode * temp;
-	struct refs_inode * ind;
+	struct refs_inode* res;
 
-	temp = (union inode *) inode_table;
-	ind = &(temp->inode);
-	char * path2 = (char *) path;
+	if(strcmp(path, "/")){
+		char * dup = malloc(sizeof(char) * strlen(path));
 
-	struct refs_inode *res = getattr_search(path2 + 1, ind);
-	if (res == NULL) {
-		return -ENOENT;
+		strcpy(dup, path);
+
+		char * base = basename(dup);
+
+		int inum = get_parent_inum((char *) path);
+
+		if (inum == -1) {
+			return -ENOENT;
+		}
+
+		res = (struct refs_inode *) &(inode_table[inum]).inode;
+
+		inum = find_child_inum(base, res);
+
+		free(dup);
+
+		if (inum == -1) {
+			return -ENOENT;
+		}
+
+		res = (struct refs_inode*) &(inode_table[inum]).inode;
+	} else{
+		res = (struct refs_inode *) &(inode_table[0]).inode;
 	}
 
 	stbuf->st_nlink = res->n_links;
@@ -536,7 +601,7 @@ static int refs_getattr(const char * path, struct stat* stbuf){
 	} else if (res->flags & INODE_TYPE_REG){
 		stbuf->st_mode = res->permissions | S_IFREG;
 	} else{
-		printf("Unknown File type\n");
+		printf("Unknown File type");
 	}
 
 	stbuf->st_size = res->size;
@@ -544,17 +609,6 @@ static int refs_getattr(const char * path, struct stat* stbuf){
 	stbuf->st_ino = res->inum;
 
 	return 0;
-
-	/*
-	for(int i = 0; i< sb->num_inodes; i++){
-		if(get_bit((struct bitmap*)sb->i_bitmap_start, i)){
-			temp = (union inode *)sb->i_table_start + i;
-			ind = &temp.inode;
-
-		}
-
-	}
-	*/
 }
 
 static int refs_access(const char *path, int mask){
@@ -572,62 +626,113 @@ static int refs_access(const char *path, int mask){
 
 static int refs_mkdir(const char* path, mode_t mode){
 
-	int i =0;
-	int lastSlash = 0;
-	while (*(path + i) != '\0'){
-		if(*(path + i) == '/'){
-			lastSlash = i;
-		}
-		i++;
-	}
+	char * dup = malloc(sizeof(char) * strlen(path));
 
-	char * start = (char *) calloc(sizeof(char), lastSlash+1);
+	strcpy(dup, path);
 
-	strncpy(start, path, lastSlash);
+	char * temp = dirname(dup);
 
-	start[lastSlash] = '\0';
-
-	union inode * temp;
-	struct refs_inode * ind;
-
-	temp = (union inode *) inode_table;
-	ind = &temp->inode;
-	struct refs_inode *res = getattr_search(start + 1, ind);
-
-	if(res == NULL){
-		return -1;
-	}
-
-	if(refs_access(start, W_OK)){
+	if(refs_access(temp, W_OK)){
 		return -EACCES;
 	}
 
-	char * path2 = (char *) path;
+	int parentInum = get_parent_inum((char *) path);
 
-	if(searchForDir(res, path2+i+1) != NULL){
+	if(parentInum == -1){
+		return -1;
+	}
+
+	struct refs_inode* parent = (struct refs_inode *) &(inode_table[parentInum]).inode;
+
+	strcpy(dup, path);
+
+	temp = basename(dup);
+
+	union directory_block *blk = malloc(sizeof(union directory_block));
+	if(find_child_inum(temp, parent) != -1){
 		return -EEXIST;
 	}
 
 	int inum = reserve_dir_inode();
 
-	return 0;
+	lba_t data_lba = reserve_data_block();
+
+	union directory_block *dir_data = malloc_blocks(1);
+
+	// init "."
+	dir_data->dirents[0].inum = inum;
+	dir_data->dirents[0].is_valid = 1;
+	strcpy(dir_data->dirents[0].path, ".");
+	dir_data->dirents[0].path_len = strlen(dir_data->dirents[0].path);
+
+	// init ".."
+	dir_data->dirents[1].inum = parentInum;
+	dir_data->dirents[1].is_valid = 1;
+	strcpy(dir_data->dirents[1].path, "..");
+	dir_data->dirents[1].path_len = strlen(dir_data->dirents[1].path);
+
+	// update the inode's first direct pointer to point to this data
+	inode_table[inum].inode.size = 4096;
+	inode_table[inum].inode.blocks = 1;
+	inode_table[inum].inode.block_ptrs[0] = data_lba;
+	inode_table[inum].inode.permissions = 0664;
+
+	write_block(dir_data, data_lba);
+	sync_data_bitmap();
+	write_inode(inum);
+	sync_inode_bitmap();
+
+	parent->n_links += 1;
+
+	for(int j = 0; j < parent->blocks; j++){
+		read_block(blk, parent->block_ptrs[j]);
+		for(int n = 0; n < DIRENTS_PER_BLOCK; n++){
+			struct dir_entry *dir = blk->dirents + n;
+			if(!dir->is_valid){
+				dir->is_valid = 1;
+				dir->inum = inum;
+				strcpy(dir->path, temp);
+				dir->path_len = strlen(dir->path);
+				write_block(blk, parent->block_ptrs[j]);
+				free(dup);
+				return 0;
+			}
+		}
+	}
+
+	if(parent->blocks < NUM_DIRECT){
+		lba_t data2_lba = reserve_data_block();
+		union directory_block *dir2_data = malloc_blocks(1);
+
+		dir2_data->dirents[0].inum = inum;
+		dir2_data->dirents[0].is_valid = 1;
+		strcpy(dir2_data->dirents[0].path, temp);
+		dir2_data->dirents[0].path_len = strlen(dir_data->dirents[0].path);
+
+		write_block(dir2_data, data2_lba);
+		sync_data_bitmap();
+		free(dup);
+		return 0;
+	}
+	free(dup);
+	return -1;
 }
 
 static int refs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 			 off_t offset, struct fuse_file_info *fi) {
-	
+
 	union inode *temp = (union inode *) inode_table;
 	struct refs_inode *ind = &temp->inode;
 	struct refs_inode *res = getattr_search(path + 1, ind);
-	
+
 	if(res == NULL){
 		return -ENOENT;
 	}
-	
+
 	off_t num = offset;
 	int i_start = offset / res->size;
 	int pathlen = strlen(path);
-	
+
 	union directory_block *blk = malloc(sizeof(union directory_block));
 	for (int i = i_start; i < res->size; i++) {
 		read_block(blk, res->block_ptrs[i]);
@@ -639,27 +744,27 @@ static int refs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 			struct dir_entry *dir = blk->dirents + j;
 			if (dir->is_valid && num > offset) {
 				int subpathlen = strlen(dir->path);
-				
+
 				char *appendedFilename = malloc(sizeof(char) * (pathlen + subpathlen + 1));
 				strncpy(appendedFilename, path, pathlen);
 				strncpy(appendedFilename + pathlen, "/", 1);
 				strncpy(appendedFilename + pathlen + 1, dir->path, subpathlen);
-				
+
 				struct stat info;
 				refs_getattr(appendedFilename, &info);
-				
+
 				if (filler(buf, appendedFilename, &info, num + 1)) {
 					free(appendedFilename);
 					return 0;
 				}
-				
+
 				free(appendedFilename);
 			}
 			num++;
 		}
 	}
 	return 0;
-	
+
 }
 
 
