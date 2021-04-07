@@ -19,5 +19,27 @@ but your FUSE file system's `main()` method should be in a file named `refs.c`.
 
 ## Implementation details
 
-_please fill this section with any relevant details that will help with running/using/reading your code._
+To compile our code, simply run the 'make' command in the terminal.
 
+To mount the file system, simply run '.\refs -s -d mnt', or '.\refs -s -f mnt'.
+(The code won't run without the -d, or -f flags).
+
+Once the file system is mounted, our file system currently supports four
+operations: getattr(), mkdir(), readdir(),
+and access(). As such, the file system will support any calls of mkdir, ls, cd,
+and stat. Additionally, any directories created using 'mkdir' will remain
+persistently even after unmounting and mounting.
+
+To unmount the file system, simply run 'fusermount -u mnt'.
+
+To run our testing code (which is still a work in progress):
+
+First, delete the refs_disk folder.
+
+Mount the file system as already described.
+
+Compile using 'gcc -o test-access test-access.c'.
+
+To run the testing code, run './test-access'.
+
+After testing, then just unmount the file system as described.

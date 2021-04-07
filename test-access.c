@@ -4,6 +4,8 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <unistd.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 
 /*
 // This program tests to see if the access, mkdir function performs as
@@ -35,7 +37,7 @@ int main(int argc, char **argv) {
 		printf("failed: not able to read, or write directory\n");
 		return 1;
 	}
-	
+
 	// when checking if a directory can be made.
 	if (mkdir("mnt/a", S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH) != 0) {
 		printf("failed: not able to make directory\n");
@@ -45,5 +47,4 @@ int main(int argc, char **argv) {
 		printf("failed: not able to make directory\n");
 		return 1;
 	}
-	
-	
+}
