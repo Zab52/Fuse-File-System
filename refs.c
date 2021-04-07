@@ -250,6 +250,7 @@ static int alloc_root_dir() {
 	// itself. We also require / have inum 0 to simplify our FS layout
 
 	union directory_block *root_data = malloc_blocks(1);
+	bzero(root_data, BLOCK_SIZE);
 
 	// init "."
 	root_data->dirents[0].inum = ROOT_INUM;
@@ -267,7 +268,7 @@ static int alloc_root_dir() {
 	inode_table[inum].inode.size = 4096;
 	inode_table[inum].inode.blocks = 1;
 	inode_table[inum].inode.block_ptrs[0] = data_lba;
-	inode_table[inum].inode.permissions = 0664;
+	inode_table[inum].inode.permissions = 0764;
 
 	// write the directory contents to its data block
 	write_block(root_data, data_lba);
@@ -461,61 +462,14 @@ static void refs_destroy(struct fuse_conn_info *conn){
 
 }
 
-static int lookForSlash(char *str, char *buf) {
-	for (int i = 0; i < strlen(str); i++) {
-		if (*(str + i) == '/') {
-			strncpy(buf, str, i);
-			return i + 1;
-		}
-	}
-	strcpy(buf, str);
-	return strlen(str);
-}
-
-struct dir_entry * searchForDir(struct refs_inode *ino, char *search) {
-	union directory_block *blk = malloc(sizeof(union directory_block));
-	for (int i = 0; i < ino->size; i++) {
-		read_block(blk, ino->block_ptrs[i]);
-		for (int j = 0; j < DIRENTS_PER_BLOCK; j++) {
-			struct dir_entry *dir = blk->dirents + j;
-			if (dir != NULL && dir->is_valid){
-				if (dir->is_valid && !strcmp(dir->path, search)) {
-					free(blk);
-					return dir;
-				}
-			}
-		}
-	}
-	free(blk);
-	return NULL;
-}
-
-struct refs_inode * getattr_search(char *path,
-			   struct refs_inode *begin) {
-	if (strlen(path) == 0) {
-		return begin;
-	}
-
-	if (begin->flags & INODE_TYPE_REG) {
-		return NULL;
-	}
-
-	char toSearch[MAX_PATH_LEN];
-	int ind = lookForSlash(path, toSearch);
-
-	struct dir_entry * dir = searchForDir(begin, toSearch);
-	if (dir == NULL) {
-		return NULL;
-	}
-
-	union inode *tmp = ((union inode*) (inode_table)) + dir->inum;
-	struct refs_inode *child = &(tmp->inode);
-	return getattr_search(path + ind, child);
-}
-
 int find_child_inum(char * path, struct refs_inode* ino){
 	union directory_block * blk = malloc(sizeof(union directory_block));
-	for (int i = 0; i < ino->size; i++) {
+
+	if(ino == NULL){
+		return -1;
+	}
+
+	for (int i = 0; i < ino->blocks; i++) {
 		read_block(blk, ino->block_ptrs[i]);
 		for (int j = 0; j < DIRENTS_PER_BLOCK; j++) {
 			struct dir_entry *dir = &blk->dirents[j];
@@ -536,15 +490,21 @@ int get_parent_inum(char * path){
 
 	char * dup = malloc(sizeof(char) * strlen(path));
 
+	strcpy(dup, path);
+
 	char * parentPath = dirname(dup);
 
   char delem[2] = "/";
 
-	char * temp = strtok(parentPath, delem);
+	char * temp = strtok(parentPath + 1, delem);
 	int inum = 0;
 
 	while(temp != NULL){
 		current = (struct refs_inode *) &(inode_table[inum]).inode;
+
+		if(!(current->flags & INODE_TYPE_DIR)){
+			return -ENOTDIR;
+		}
 
 		inum = find_child_inum(temp, current);
 		if(inum == -1){
@@ -566,7 +526,6 @@ static int refs_getattr(const char * path, struct stat* stbuf){
 	struct refs_inode* res;
 
 	if(strcmp(path, "/")){
-		char * dup = malloc(sizeof(char) * strlen(path));
 
 		strcpy(dup, path);
 
@@ -617,7 +576,9 @@ static int refs_access(const char *path, int mask){
 
 	refs_getattr(path, &perm);
 
-	if(mask & (perm.st_mode >> 6)){
+	if(mask == F_OK && (mask & perm.st_mode)){
+		return 0;
+	} else if ((mask & (perm.st_mode >> 6)) == mask){
 		return 0;
 	}
 
@@ -639,7 +600,7 @@ static int refs_mkdir(const char* path, mode_t mode){
 	int parentInum = get_parent_inum((char *) path);
 
 	if(parentInum == -1){
-		return -1;
+		return -ENOENT;
 	}
 
 	struct refs_inode* parent = (struct refs_inode *) &(inode_table[parentInum]).inode;
@@ -649,6 +610,7 @@ static int refs_mkdir(const char* path, mode_t mode){
 	temp = basename(dup);
 
 	union directory_block *blk = malloc(sizeof(union directory_block));
+	bzero(blk, BLOCK_SIZE);
 	if(find_child_inum(temp, parent) != -1){
 		return -EEXIST;
 	}
@@ -658,6 +620,7 @@ static int refs_mkdir(const char* path, mode_t mode){
 	lba_t data_lba = reserve_data_block();
 
 	union directory_block *dir_data = malloc_blocks(1);
+	bzero(dir_data, BLOCK_SIZE);
 
 	// init "."
 	dir_data->dirents[0].inum = inum;
@@ -675,7 +638,7 @@ static int refs_mkdir(const char* path, mode_t mode){
 	inode_table[inum].inode.size = 4096;
 	inode_table[inum].inode.blocks = 1;
 	inode_table[inum].inode.block_ptrs[0] = data_lba;
-	inode_table[inum].inode.permissions = 0664;
+	inode_table[inum].inode.permissions = 0764;
 
 	write_block(dir_data, data_lba);
 	sync_data_bitmap();
@@ -695,14 +658,17 @@ static int refs_mkdir(const char* path, mode_t mode){
 				dir->path_len = strlen(dir->path);
 				write_block(blk, parent->block_ptrs[j]);
 				free(dup);
+				write_inode(parentInum);
 				return 0;
 			}
 		}
 	}
 
 	if(parent->blocks < NUM_DIRECT){
+		parent->blocks += 1;
 		lba_t data2_lba = reserve_data_block();
 		union directory_block *dir2_data = malloc_blocks(1);
+		bzero(dir2_data, BLOCK_SIZE);
 
 		dir2_data->dirents[0].inum = inum;
 		dir2_data->dirents[0].is_valid = 1;
@@ -711,9 +677,12 @@ static int refs_mkdir(const char* path, mode_t mode){
 
 		write_block(dir2_data, data2_lba);
 		sync_data_bitmap();
+		write_inode(parentInum);
 		free(dup);
 		return 0;
 	}
+
+	write_inode(parentInum);
 	free(dup);
 	return -1;
 }
@@ -721,46 +690,67 @@ static int refs_mkdir(const char* path, mode_t mode){
 static int refs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 			 off_t offset, struct fuse_file_info *fi) {
 
-	union inode *temp = (union inode *) inode_table;
-	struct refs_inode *ind = &temp->inode;
-	struct refs_inode *res = getattr_search(path + 1, ind);
+	struct refs_inode* res;
 
-	if(res == NULL){
-		return -ENOENT;
+	if(strcmp(path, "/")){
+
+		char * dup = malloc(sizeof(char) * strlen(path));
+
+		strcpy(dup, path);
+
+		char * base = basename(dup);
+
+		int parentInum = get_parent_inum((char *) path);
+
+		if(parentInum == -1){
+			return -ENOENT;
+		}
+
+		res = (struct refs_inode *) &inode_table[parentInum].inode;
+
+		int inum = find_child_inum(base, res);
+
+		if(inum == -1){
+			return -ENOENT;
+		}
+
+		free(dup);
+
+		res = (struct refs_inode *) &inode_table[inum].inode;
+	} else {
+		res = (struct refs_inode *) &inode_table[0].inode;
 	}
 
-	off_t num = offset;
-	int i_start = offset / res->size;
+	off_t num = 0;
 	int pathlen = strlen(path);
 
 	union directory_block *blk = malloc(sizeof(union directory_block));
-	for (int i = i_start; i < res->size; i++) {
+	bzero(blk, sizeof(union directory_block));
+	for (int i = 0; i < res->blocks; i++) {
 		read_block(blk, res->block_ptrs[i]);
-		int j_start = 0;
-		if (i == i_start) {
-			j_start = offset % res->size;
-		}
-		for (int j = j_start; j < DIRENTS_PER_BLOCK; j++) {
+		for (int j = 0; j < DIRENTS_PER_BLOCK; j++) {
 			struct dir_entry *dir = blk->dirents + j;
-			if (dir->is_valid && num > offset) {
-				int subpathlen = strlen(dir->path);
+			if (dir->is_valid){
+					if(num > offset){
+						int subpathlen = strlen(dir->path);
+						printf("HERE: %s\n", dir->path);
 
-				char *appendedFilename = malloc(sizeof(char) * (pathlen + subpathlen + 1));
-				strncpy(appendedFilename, path, pathlen);
-				strncpy(appendedFilename + pathlen, "/", 1);
-				strncpy(appendedFilename + pathlen + 1, dir->path, subpathlen);
+						char *appendedFilename = malloc(sizeof(char) * (pathlen + subpathlen + 1));
+						strncpy(appendedFilename, path, pathlen);
+						strncpy(appendedFilename + pathlen, dir->path, subpathlen + 1);
 
-				struct stat info;
-				refs_getattr(appendedFilename, &info);
+						struct stat info;
+						refs_getattr(appendedFilename, &info);
 
-				if (filler(buf, appendedFilename, &info, num + 1)) {
-					free(appendedFilename);
-					return 0;
+						if (filler(buf, dir->path, &info, num + 1)) {
+							free(appendedFilename);
+							return 0;
+						}
+
+						free(appendedFilename);
+					}
+					num++;
 				}
-
-				free(appendedFilename);
-			}
-			num++;
 		}
 	}
 	return 0;
