@@ -456,7 +456,7 @@ static void* refs_init(struct fuse_conn_info *conn) {
 // This function deallocates each of the global variables stored within the FS,
 // and closes the file that is acting as the harddrive.
 */
-static void refs_destroy(struct fuse_conn_info *conn){
+static void refs_destroy(void *conn){
 
 	free(inode_table);
 	free_bitmap(inode_bitmap);
@@ -501,6 +501,12 @@ int find_child_inum(char * path, struct refs_inode* ino){
 // by a path. This function then returns the inode number of this parent inode.
 // Returns -1 if the parent inode isn't found.
 */
+//$ Instead of returning the parent inum, I suggest returning the error/success
+//$ status (0 on succes, -errno on error).
+//$ Then, add an argument "uint64_t *inum", and when you have determined
+//$ the inum, you can set "*inum = value;"
+//$ This model for a function lets you easily propagate the exact error
+//$ (since, for example, -ENOENT and -ENOTDIR are both possible errors)
 int get_parent_inum(char * path){
 	struct refs_inode * current;
 	char * dup = malloc(sizeof(char) * strlen(path));
@@ -522,6 +528,7 @@ int get_parent_inum(char * path){
 
 		// Case where an inode on the path isn't a directory inode.
 		if(!(current->flags & INODE_TYPE_DIR)){
+			//$ free(dup);
 			return -ENOTDIR;
 		}
 
@@ -531,6 +538,7 @@ int get_parent_inum(char * path){
 		// Case where the inode isn't found.
 		if(inum == -1){
 			free(dup);
+			//$ I would return -ENOENT here.
 			return -1;
 		}
 
@@ -548,6 +556,8 @@ int get_parent_inum(char * path){
 */
 static int refs_getattr(const char * path, struct stat* stbuf){
 
+	//$ strdup() nicely does the malloc and strcpy for you
+	//$ I suggest checking that function out!
 	char * dup = malloc(sizeof(char) * strlen(path));
 
 	struct refs_inode* res;
@@ -591,6 +601,8 @@ static int refs_getattr(const char * path, struct stat* stbuf){
 	stbuf->st_blocks = res->blocks;
 
 	if(res->flags & INODE_TYPE_DIR){
+		//$ I might move the S_IFDIR directly into your permissions,
+		//$ more closely matching the "mode" structure.
 		stbuf->st_mode = res->permissions | S_IFDIR;
 	} else if (res->flags & INODE_TYPE_REG){
 		stbuf->st_mode = res->permissions | S_IFREG;
@@ -615,14 +627,18 @@ static int refs_access(const char *path, int mask){
 
 	struct stat perm;
 
-	refs_getattr(path, &perm);
+	int ret = refs_getattr(path, &perm);
+	if (ret != 0)
+		return ret;
+	if (mask == F_OK) {
+		return 0;
+	}
 
 	if(mask == F_OK && (mask & perm.st_mode)){
 		return 0;
 	} else if ((mask & (perm.st_mode >> 6)) == mask){
 		return 0;
 	}
-
 	return -1;
 }
 
@@ -646,6 +662,8 @@ static int refs_mkdir(const char* path, mode_t mode){
 	// Finding the parent inode number of the path,
 	int parentInum = get_parent_inum((char *) path);
 
+	//$ You also return -ENOTDIR in some cases. See my note about separating
+	//$ the status from the return value.
 	// Case where path is invalid.
 	if(parentInum == -1){
 		return -ENOENT;
@@ -693,7 +711,7 @@ static int refs_mkdir(const char* path, mode_t mode){
 	inode_table[inum].inode.size = 4096;
 	inode_table[inum].inode.blocks = 1;
 	inode_table[inum].inode.block_ptrs[0] = data_lba;
-	inode_table[inum].inode.permissions = mode;
+	inode_table[inum].inode.permissions = mode; //$ here, you could add S_IFDIR
 
 	// Saving changes to the filesystem.
 	write_block(dir_data, data_lba);
@@ -748,6 +766,7 @@ static int refs_mkdir(const char* path, mode_t mode){
 	write_inode(parentInum);
 	free(dup);
 	free(blk);
+	//$ I might return -ENOSPC here
 	return -1;
 }
 
@@ -818,12 +837,14 @@ static int refs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 			// Checking that the dirtory entry found is valid.
 			if (dir->is_valid){
 					if(num > offset){
+						//$ this seems to be doing more than needed. Instead of calling refs_getattr, you could directly access the inode using the inode number stored in the directory. This might simplify the logic.
 						int subpathlen = strlen(dir->path);
 
 						char *appendedFilename = malloc(sizeof(char) * (pathlen + subpathlen + 1));
 						strncpy(appendedFilename, path, pathlen);
 						strncpy(appendedFilename + pathlen, dir->path, subpathlen + 1);
 
+						//$ you only need to update the inode number and mode, and you could directly grab those values by accessing the inode table using the dirent's inode number
 						struct stat info;
 						refs_getattr(appendedFilename, &info);
 
