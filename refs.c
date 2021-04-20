@@ -845,6 +845,90 @@ static int refs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 	return 0;
 }
 
+static void fill(char *str, int begin, int end, char thing) {
+	for (int i = begin; i <= end; i++) {
+		str[i] = thing;
+	}
+}
+
+static int my_hello_truncate(const char *path, off_t size) {
+
+	struct refs_inode* ino;
+	
+	// Case where file doesn't have write permissions.
+	if(refs_access(path, W_OK)){
+		return -EACCES;
+	}
+
+	// Getting the parent inode number of the path.
+	int inum = get_parent_inum((char *) path);
+
+	// Case where inodes doesn't exist for the parent path.
+	if (inum == -1) {
+		return -ENOENT;
+	}
+
+	ino = (struct refs_inode *) &(inode_table[inum]).inode;
+
+	// Finding the desired inode number for the path
+	char * base = basename(path);
+	inum = find_child_inum(base, ino);
+
+	// Case where the inode doesn't exist for this path.
+	if (inum == -1) {
+		return -ENOENT;
+	}
+	
+	ino = (struct refs_inode *) &(inode_table[inum]).inode;
+	
+	if (ino->size < size) {
+		int firstBlock = ino->size / BLOCK_SIZE;
+		int lastBlock = (size - 1) / BLOCK_SIZE;
+		
+		int byteOffsetBegin = ino->size % BLOCK_SIZE;
+		int byteOffsetEnd = (ino->size - 1) % BLOCK_SIZE + 1;
+		
+		if (firstBlock == lastBlock) {
+			char *block = malloc(sizeof(char) * BLOCK_SIZE);
+			
+			read_blocks(block, 1, firstBlock);
+			fill(block, byteOffsetBegin, byteOffsetEnd - 1, 0);
+			write_blocks(block, 1, firstBlock);
+			
+			free(block);
+		} else {
+			char *blockBegin = malloc(sizeof(char) * BLOCK_SIZE);
+			char *blockEnd = malloc(sizeof(char) * BLOCK_SIZE);
+			
+			read_blocks(blockBegin, 1, firstBlock);
+			fill(blockBegin, byteOffsetBegin, BLOCK_SIZE - 1, 0);
+			write_blocks(blockBegin, 1, firstBlock);
+			
+			read_blocks(blockEnd, 1, lastBlock);
+			fill(blockEnd, 0, byteOffsetEnd - 1, 0);
+			write_blocks(blockEnd, 1, lastBlock);
+			
+			int numMiddleBlocks = lastBlock - firstBlock + 1;
+			if (numMiddleBlocks > 0) {
+				char *blocksInTheMiddle = malloc(sizeof(char) * (BLOCK_SIZE * numMiddleBlocks));
+				
+				read_blocks(blocksInTheMiddle, numMiddleBlocks, firstBlock + 1);
+				fill(blocksInTheMiddle, 0, BLOCK_SIZE * numMiddleBlocks - 1, 0);
+				write_blocks(blocksInTheMiddle, numMiddleBlocks, firstBlock + 1);
+				
+				free(blocksInTheMiddle);
+			}
+			free(blockBegin);
+			free(blockEnd);
+		}
+	} else {
+		// do the same thing but reversed
+	}
+	
+	ino->size = size;
+	return 0;
+}
+
 
 
 // You should implement the functions that you need, but do so in a
