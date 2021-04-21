@@ -24,6 +24,8 @@
 #include <sys/xattr.h>
 #endif
 
+#define BLOCKS_PER_BLOCK (BLOCK_SIZE) / sizeof(lba_t)
+
 // The first thing we do in init is open the "disk file".
 // We use this backing file as our "disk" for all I/O in ReFS.
 static int disk_fd;
@@ -851,9 +853,42 @@ static void fill(char *str, int begin, int end, char thing) {
 	}
 }
 
+static int min(int a, int b) {
+	if (a < b) {
+		return a;
+	}
+	return b;
+}
+
+static void ext_read_blocks(char *buf, int numBlocks, off_t start, struct refs_inode *ino) {
+	if (start < NUM_DIRECT) {
+		int endDirect = min(start + numBlocks - 1, NUM_DIRECT - 1);
+		read_blocks(buf, endDirect - start + 1, start);
+		int numReadDirect = NUM_DIRECT - start + 1;
+		
+		// offsetting start, numBlocks, and buf to make code easier
+		numBlocks -= numReadDirect;
+		start = NUM_DIRECT;
+		buf += numReadDirect * BLOCK_SIZE;
+	}
+	if (numBlocks > 0) {
+		int startIndirect = start - NUM_DIRECT;
+		for (int i = startIndirect; i < startIndirect + numBlocks; i++) {
+			int indirectBlock = i / BLOCKS_PER_BLOCK;
+			int offsetIndirect = i % BLOCKS_PER_BLOCK;
+			// TODO: read indirect block #indirectBlock at offsetIndirect into buf
+			buf += BLOCK_SIZE;
+		}
+	}
+}
+
+static void ext_write_blocks(char *buf, int numBlocks, off_t start, struct refs_inode *ino) {
+	// TODO: do the same thing as read lol
+}
+
 static int my_hello_truncate(const char *path, off_t size) {
 
-	struct refs_inode* ino;
+	struct refs_inode *ino;
 	
 	// Case where file doesn't have write permissions.
 	if(refs_access(path, W_OK)){
@@ -891,30 +926,30 @@ static int my_hello_truncate(const char *path, off_t size) {
 		if (firstBlock == lastBlock) {
 			char *block = malloc(sizeof(char) * BLOCK_SIZE);
 			
-			read_blocks(block, 1, firstBlock);
+			ext_read_blocks(block, 1, firstBlock, ino);
 			fill(block, byteOffsetBegin, byteOffsetEnd - 1, 0);
-			write_blocks(block, 1, firstBlock);
+			ext_write_blocks(block, 1, firstBlock, ino);
 			
 			free(block);
 		} else {
 			char *blockBegin = malloc(sizeof(char) * BLOCK_SIZE);
 			char *blockEnd = malloc(sizeof(char) * BLOCK_SIZE);
 			
-			read_blocks(blockBegin, 1, firstBlock);
+			ext_read_blocks(blockBegin, 1, firstBlock, ino);
 			fill(blockBegin, byteOffsetBegin, BLOCK_SIZE - 1, 0);
-			write_blocks(blockBegin, 1, firstBlock);
+			ext_write_blocks(blockBegin, 1, firstBlock, ino);
 			
-			read_blocks(blockEnd, 1, lastBlock);
+			ext_read_blocks(blockEnd, 1, lastBlock, ino);
 			fill(blockEnd, 0, byteOffsetEnd - 1, 0);
-			write_blocks(blockEnd, 1, lastBlock);
+			ext_write_blocks(blockEnd, 1, lastBlock, ino);
 			
 			int numMiddleBlocks = lastBlock - firstBlock + 1;
 			if (numMiddleBlocks > 0) {
 				char *blocksInTheMiddle = malloc(sizeof(char) * (BLOCK_SIZE * numMiddleBlocks));
 				
-				read_blocks(blocksInTheMiddle, numMiddleBlocks, firstBlock + 1);
+				ext_read_blocks(blocksInTheMiddle, numMiddleBlocks, firstBlock + 1, ino);
 				fill(blocksInTheMiddle, 0, BLOCK_SIZE * numMiddleBlocks - 1, 0);
-				write_blocks(blocksInTheMiddle, numMiddleBlocks, firstBlock + 1);
+				ext_write_blocks(blocksInTheMiddle, numMiddleBlocks, firstBlock + 1, ino);
 				
 				free(blocksInTheMiddle);
 			}
@@ -922,7 +957,7 @@ static int my_hello_truncate(const char *path, off_t size) {
 			free(blockEnd);
 		}
 	} else {
-		// do the same thing but reversed
+		// TODO: do the same thing but reversed
 	}
 	
 	ino->size = size;
