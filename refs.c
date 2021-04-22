@@ -458,7 +458,7 @@ static void* refs_init(struct fuse_conn_info *conn) {
 // This function deallocates each of the global variables stored within the FS,
 // and closes the file that is acting as the harddrive.
 */
-static void refs_destroy(struct fuse_conn_info *conn){
+static void refs_destroy(void *conn){
 
 	free(inode_table);
 	free_bitmap(inode_bitmap);
@@ -498,29 +498,21 @@ int find_child_inum(char * path, struct refs_inode* ino){
 	return -1;
 }
 
-/*
-// A helper function that finds the parent inode given a directory specified
-// by a path. This function then returns the inode number of this parent inode.
-// Returns -1 if the parent inode isn't found.
-*/
-int get_parent_inum(char * path){
-	struct refs_inode * current;
-	char * dup = malloc(sizeof(char) * strlen(path));
-	strcpy(dup, path);
 
-	// Retrieving the parent directories path.
-	char * parentPath = dirname(dup);
+int get_path_inum(char * path, int * inum){
+
+	struct refs_inode * current;
 
 	// Tokenizing the path name.
   char delem[2] = "/";
-	char * temp = strtok(parentPath + 1, delem);
+	char * temp = strtok(path + 1, delem);
 
 
-	int inum = 0;
+  * inum = 0;
 
 	// Searching through each inode starting from the root for the next token.
 	while(temp != NULL){
-		current = (struct refs_inode *) &(inode_table[inum]).inode;
+		current = (struct refs_inode *) &(inode_table[*inum]).inode;
 
 		// Case where an inode on the path isn't a directory inode.
 		if(!(current->flags & INODE_TYPE_DIR)){
@@ -528,20 +520,36 @@ int get_parent_inum(char * path){
 		}
 
 		// Finding the inode number of the next inode in the path.
-		inum = find_child_inum(temp, current);
+		*inum = find_child_inum(temp, current);
 
 		// Case where the inode isn't found.
-		if(inum == -1){
-			free(dup);
-			return -1;
+		if(*inum == -1){
+			return -ENOENT;
 		}
 
 		temp = strtok(NULL, delem);
 	}
 
-	free(dup);
-	return inum;
+	return 0;
 }
+
+/*
+// A helper function that finds the parent inode given a directory specified
+// by a path. This function then returns the inode number of this parent inode.
+// Returns -1 if the parent inode isn't found.
+*/
+int get_parent_inum(char * path, int * inum){
+	char * dup = malloc(sizeof(char) * strlen(path));
+	strcpy(dup, path);
+
+	// Retrieving the parent directories path.
+	char * parentPath = dirname(dup);
+
+	int ret =  get_path_inum(parentPath, inum);
+	free(dup);
+	return ret;
+}
+
 
 /*
 // Given a path, this function finds the paths corresponding inode, and then
@@ -554,31 +562,22 @@ static int refs_getattr(const char * path, struct stat* stbuf){
 
 	struct refs_inode* res;
 
+	int inum = 0;
+	int ret = 0;
+
 	// Checking to make sure the path isn't just the root path.
 	if(strcmp(path, "/")){
 
 		strcpy(dup, path);
 
-		char * base = basename(dup);
-
 		// Getting the parent inode number of the path.
-		int inum = get_parent_inum((char *) path);
-
-		// Case where inodes doesn't exist for the parent path.
-		if (inum == -1) {
-			return -ENOENT;
-		}
-
-		res = (struct refs_inode *) &(inode_table[inum]).inode;
-
-		// Finding the desired inode number for the path
-		inum = find_child_inum(base, res);
+		ret = get_path_inum((char *) path, &inum);
 
 		free(dup);
 
-		// Case where the inode doesn't exist for this path.
-		if (inum == -1) {
-			return -ENOENT;
+		// Case where inodes doesn't exist for the parent path.
+		if (ret != 0) {
+			return ret;
 		}
 
 		res = (struct refs_inode*) &(inode_table[inum]).inode;
@@ -639,6 +638,8 @@ static int refs_mkdir(const char* path, mode_t mode){
 	strcpy(dup, path);
 
 	char * temp = dirname(dup);
+	int parentInum = 0;
+	int ret = 0;
 
 	// Case where parent directory doesn't have write permissions.
 	if(refs_access(temp, W_OK)){
@@ -646,11 +647,11 @@ static int refs_mkdir(const char* path, mode_t mode){
 	}
 
 	// Finding the parent inode number of the path,
-	int parentInum = get_parent_inum((char *) path);
+	ret = get_parent_inum((char *) path, &parentInum);
 
 	// Case where path is invalid.
-	if(parentInum == -1){
-		return -ENOENT;
+	if(ret != 0){
+		return ret;
 	}
 
 	struct refs_inode* parent = (struct refs_inode *) &(inode_table[parentInum]).inode;
@@ -765,6 +766,8 @@ static int refs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 			 off_t offset, struct fuse_file_info *fi) {
 
 	struct refs_inode* res;
+	int inum = 0;
+	int ret = 0;
 
 	// Case where the path isn't the root path.
 	if(strcmp(path, "/")){
@@ -773,27 +776,15 @@ static int refs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 
 		strcpy(dup, path);
 
-		char * base = basename(dup);
-
 		// Finding the parent inode number of the path.
-		int parentInum = get_parent_inum((char *) path);
-
-		// Case where the path isn't valid.
-		if(parentInum == -1){
-			return -ENOENT;
-		}
-
-		res = (struct refs_inode *) &inode_table[parentInum].inode;
-
-		// Finding the inode number of the path.
-		int inum = find_child_inum(base, res);
-
-		// Case where the path isn't valid.
-		if(inum == -1){
-			return -ENOENT;
-		}
+		ret = get_path_inum((char *) path, &inum);
 
 		free(dup);
+
+		// Case where the path isn't valid.
+		if(ret != 0){
+			return ret;
+		}
 
 		res = (struct refs_inode *) &inode_table[inum].inode;
 	} else {
@@ -865,7 +856,7 @@ static void ext_read_blocks(char *buf, int numBlocks, off_t start, struct refs_i
 		int endDirect = min(start + numBlocks - 1, NUM_DIRECT - 1);
 		read_blocks(buf, endDirect - start + 1, start);
 		int numReadDirect = NUM_DIRECT - start + 1;
-		
+
 		// offsetting start, numBlocks, and buf to make code easier
 		numBlocks -= numReadDirect;
 		start = NUM_DIRECT;
@@ -889,68 +880,60 @@ static void ext_write_blocks(char *buf, int numBlocks, off_t start, struct refs_
 static int my_hello_truncate(const char *path, off_t size) {
 
 	struct refs_inode *ino;
-	
+
+	int ret = 0;
+	int inum = 0;
+
 	// Case where file doesn't have write permissions.
 	if(refs_access(path, W_OK)){
 		return -EACCES;
 	}
 
 	// Getting the parent inode number of the path.
-	int inum = get_parent_inum((char *) path);
+	ret = get_path_inum((char *) path, &inum);
 
 	// Case where inodes doesn't exist for the parent path.
-	if (inum == -1) {
-		return -ENOENT;
+	if (ret == -1) {
+		return ret;
 	}
 
 	ino = (struct refs_inode *) &(inode_table[inum]).inode;
 
-	// Finding the desired inode number for the path
-	char * base = basename(path);
-	inum = find_child_inum(base, ino);
-
-	// Case where the inode doesn't exist for this path.
-	if (inum == -1) {
-		return -ENOENT;
-	}
-	
-	ino = (struct refs_inode *) &(inode_table[inum]).inode;
-	
 	if (ino->size < size) {
 		int firstBlock = ino->size / BLOCK_SIZE;
 		int lastBlock = (size - 1) / BLOCK_SIZE;
-		
+
 		int byteOffsetBegin = ino->size % BLOCK_SIZE;
 		int byteOffsetEnd = (ino->size - 1) % BLOCK_SIZE + 1;
-		
+
 		if (firstBlock == lastBlock) {
 			char *block = malloc(sizeof(char) * BLOCK_SIZE);
-			
+
 			ext_read_blocks(block, 1, firstBlock, ino);
 			fill(block, byteOffsetBegin, byteOffsetEnd - 1, 0);
 			ext_write_blocks(block, 1, firstBlock, ino);
-			
+
 			free(block);
 		} else {
 			char *blockBegin = malloc(sizeof(char) * BLOCK_SIZE);
 			char *blockEnd = malloc(sizeof(char) * BLOCK_SIZE);
-			
+
 			ext_read_blocks(blockBegin, 1, firstBlock, ino);
 			fill(blockBegin, byteOffsetBegin, BLOCK_SIZE - 1, 0);
 			ext_write_blocks(blockBegin, 1, firstBlock, ino);
-			
+
 			ext_read_blocks(blockEnd, 1, lastBlock, ino);
 			fill(blockEnd, 0, byteOffsetEnd - 1, 0);
 			ext_write_blocks(blockEnd, 1, lastBlock, ino);
-			
+
 			int numMiddleBlocks = lastBlock - firstBlock + 1;
 			if (numMiddleBlocks > 0) {
 				char *blocksInTheMiddle = malloc(sizeof(char) * (BLOCK_SIZE * numMiddleBlocks));
-				
+
 				ext_read_blocks(blocksInTheMiddle, numMiddleBlocks, firstBlock + 1, ino);
 				fill(blocksInTheMiddle, 0, BLOCK_SIZE * numMiddleBlocks - 1, 0);
 				ext_write_blocks(blocksInTheMiddle, numMiddleBlocks, firstBlock + 1, ino);
-				
+
 				free(blocksInTheMiddle);
 			}
 			free(blockBegin);
@@ -959,7 +942,7 @@ static int my_hello_truncate(const char *path, off_t size) {
 	} else {
 		// TODO: do the same thing but reversed
 	}
-	
+
 	ino->size = size;
 	return 0;
 }
