@@ -233,6 +233,13 @@ static int reserve_dir_inode() {
 	return inum;
 }
 
+static int reserve_regfile_inode(){
+	uint64_t inum = reserve_inode();
+	inode_table[inum].inode.flags |= INODE_TYPE_REG;
+	inode_table[inum].inode.n_links = 1;
+	return inum;
+}
+
 /**
  * Called only once during FS initialization:
  *   allocates inode 0 for `/`
@@ -270,7 +277,7 @@ static int alloc_root_dir() {
 	inode_table[inum].inode.size = 4096;
 	inode_table[inum].inode.blocks = 1;
 	inode_table[inum].inode.block_ptrs[0] = data_lba;
-	inode_table[inum].inode.permissions = 0775;
+	inode_table[inum].inode.mode = 0775;
 
 	// write the directory contents to its data block
 	write_block(root_data, data_lba);
@@ -592,9 +599,9 @@ static int refs_getattr(const char * path, struct stat* stbuf){
 	stbuf->st_blocks = res->blocks;
 
 	if(res->flags & INODE_TYPE_DIR){
-		stbuf->st_mode = res->permissions | S_IFDIR;
+		stbuf->st_mode = res->mode | S_IFDIR;
 	} else if (res->flags & INODE_TYPE_REG){
-		stbuf->st_mode = res->permissions | S_IFREG;
+		stbuf->st_mode = res->mode | S_IFREG;
 	} else{
 		printf("Unknown File type");
 	}
@@ -629,7 +636,7 @@ static int refs_access(const char *path, int mask){
 
 /*
 // This function creates a new directory at the specified path location, setting
-// the permissions to mode. If succesful, this function returns 0. Otherwise,
+// the mode to mode. If succesful, this function returns 0. Otherwise,
 // returns -1.
 */
 static int refs_mkdir(const char* path, mode_t mode){
@@ -641,7 +648,7 @@ static int refs_mkdir(const char* path, mode_t mode){
 	int parentInum = 0;
 	int ret = 0;
 
-	// Case where parent directory doesn't have write permissions.
+	// Case where parent directory doesn't have write mode.
 	if(refs_access(temp, W_OK)){
 		return -EACCES;
 	}
@@ -696,7 +703,7 @@ static int refs_mkdir(const char* path, mode_t mode){
 	inode_table[inum].inode.size = 4096;
 	inode_table[inum].inode.blocks = 1;
 	inode_table[inum].inode.block_ptrs[0] = data_lba;
-	inode_table[inum].inode.permissions = mode;
+	inode_table[inum].inode.mode = mode;
 
 	// Saving changes to the filesystem.
 	write_block(dir_data, data_lba);
@@ -884,7 +891,7 @@ static int my_hello_truncate(const char *path, off_t size) {
 	int ret = 0;
 	int inum = 0;
 
-	// Case where file doesn't have write permissions.
+	// Case where file doesn't have write mode.
 	if(refs_access(path, W_OK)){
 		return -EACCES;
 	}
@@ -948,6 +955,121 @@ static int my_hello_truncate(const char *path, off_t size) {
 }
 
 
+static int refs_rmdir(const char * path){
+
+
+
+
+	return 0;
+}
+
+static int refs_mknod(const char * path, mode_t mode, dev_t dev){
+	char * dup = malloc(sizeof(char) * strlen(path));
+	strcpy(dup, path);
+
+	char * temp = dirname(dup);
+
+	// Case where parent directory doesn't have write permissions.
+	if(refs_access(temp, W_OK)){
+		return -EACCES;
+	}
+
+	// Finding the parent inode number of the path,
+	int parentInum = 0;
+	int ret = get_parent_inum((char *) path, &parentInum);
+
+	// Case where path is invalid.
+	if(ret  != 0){
+		return ret;
+	}
+
+	struct refs_inode* parent = (struct refs_inode *) &(inode_table[parentInum]).inode;
+
+	// Finding the path to be stored in the new directory.
+	strcpy(dup, path);
+
+	temp = basename(dup);
+
+	// Case where the filename of the new directory is too long.
+	if(strlen(temp) > MAX_PATH_LEN){
+		return -ENAMETOOLONG;
+	}
+
+	union directory_block *blk = malloc(sizeof(union directory_block));
+	bzero(blk, BLOCK_SIZE);
+
+	// Checking to see if the directory file already exists.
+	if(find_child_inum(temp, parent) != -1){
+		return -EEXIST;
+	}
+
+	// Reserving space for the new directory.
+	int inum = reserve_regfile_inode();
+
+	// update the inode's direct pointer to point to itself.
+	inode_table[inum].inode.size = 0;
+	inode_table[inum].inode.blocks = 0;
+	inode_table[inum].inode.mode = mode;
+
+	// Saving changes to the filesystem.
+	write_inode(inum);
+	sync_inode_bitmap();
+
+	// Updating the number of links for the parent inode.
+	parent->n_links += 1;
+
+	// Looking for an open directory in the currently allocated blocks.
+	for(int j = 0; j < parent->blocks; j++){
+		read_block(blk, parent->block_ptrs[j]);
+		for(int n = 0; n < DIRENTS_PER_BLOCK; n++){
+			struct dir_entry *dir = blk->dirents + n;
+			if(!dir->is_valid){
+				dir->is_valid = 1;
+				dir->inum = inum;
+				strcpy(dir->path, temp);
+				dir->path_len = strlen(dir->path);
+				write_block(blk, parent->block_ptrs[j]);
+				free(dup);
+				free(blk);
+				write_inode(parentInum);
+				return 0;
+			}
+		}
+	}
+
+	// Creating a new directory block if required.
+	if(parent->blocks < NUM_DIRECT){
+		parent->blocks += 1;
+		lba_t data2_lba = reserve_data_block();
+		union directory_block *dir2_data = malloc_blocks(1);
+		bzero(dir2_data, BLOCK_SIZE);
+
+		dir2_data->dirents[0].inum = inum;
+		dir2_data->dirents[0].is_valid = 1;
+		strcpy(dir2_data->dirents[0].path, temp);
+		dir2_data->dirents[0].path_len = strlen(dir2_data->dirents[0].path);
+
+		write_block(dir2_data, data2_lba);
+		sync_data_bitmap();
+		write_inode(parentInum);
+		free(dup);
+		free(blk);
+		return 0;
+	}
+
+	// Case where we cannot allocate any more directory blocks
+	// for the parent inode.
+	write_inode(parentInum);
+	free(dup);
+	free(blk);
+	return -1;
+}
+
+int static refs_create(const char * path, mode_t mode, struct fuse_file_info * file){
+	return refs_mknod(path, mode | S_IFREG, 0);
+}
+
+
 
 // You should implement the functions that you need, but do so in a
 // way that lets you incrementally test.
@@ -957,7 +1079,9 @@ static struct fuse_operations refs_operations = {
 	.getattr	= refs_getattr,
 	.access = refs_access,
 	.mkdir = refs_mkdir,
-	.readdir	= refs_readdir
+	.readdir	= refs_readdir,
+	.mknod = refs_mknod,
+	.create = refs_create
 /*
 	.fgetattr	= NULL,
 	.access		= NULL,
