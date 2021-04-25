@@ -634,6 +634,62 @@ static int refs_access(const char *path, int mask){
 	return -1;
 }
 
+static int update_parent_inode(int childInum, int parentInum, char * childPath){
+
+	struct refs_inode* parent = (struct refs_inode *) &(inode_table[parentInum]).inode;
+
+	union directory_block *blk = malloc(sizeof(union directory_block));
+	bzero(blk, BLOCK_SIZE);
+
+	// Updating the number of links for the parent inode.
+	parent->n_links += 1;
+
+	// Looking for an open directory in the currently allocated blocks.
+	for(int j = 0; j < parent->blocks; j++){
+		read_block(blk, parent->block_ptrs[j]);
+		for(int n = 0; n < DIRENTS_PER_BLOCK; n++){
+			struct dir_entry *dir = blk->dirents + n;
+			if(!dir->is_valid){
+				dir->is_valid = 1;
+				dir->inum = childInum;
+				strcpy(dir->path, childPath);
+				dir->path_len = strlen(dir->path);
+				write_block(blk, parent->block_ptrs[j]);
+				free(blk);
+				write_inode(parentInum);
+				return 0;
+			}
+		}
+	}
+
+	// Creating a new directory block if required.
+	if(parent->blocks < NUM_DIRECT){
+		parent->blocks += 1;
+		parent->size += 4096;
+
+		lba_t data_lba = reserve_data_block();
+		bzero(blk, BLOCK_SIZE);
+
+		blk->dirents[0].inum = childInum;
+		blk->dirents[0].is_valid = 1;
+		strcpy(blk->dirents[0].path, childPath);
+		blk->dirents[0].path_len = strlen(blk->dirents[0].path);
+
+		write_block(blk, data_lba);
+		sync_data_bitmap();
+		write_inode(parentInum);
+		free(blk);
+		return 0;
+	}
+
+	// Case where we cannot allocate any more directory blocks
+	// for the parent inode.
+	parent->n_links -= 1;
+	write_inode(parentInum);
+	free(blk);
+	return -1;
+}
+
 /*
 // This function creates a new directory at the specified path location, setting
 // the mode to mode. If succesful, this function returns 0. Otherwise,
@@ -666,29 +722,26 @@ static int refs_mkdir(const char* path, mode_t mode){
 	// Finding the path to be stored in the new directory.
 	strcpy(dup, path);
 
-	temp = basename(dup);
+	char * childPath = basename(dup);
 
 	// Case where the filename of the new directory is too long.
-	if(strlen(temp) > MAX_PATH_LEN){
+	if(strlen(childPath) > MAX_PATH_LEN){
 		return -ENAMETOOLONG;
 	}
 
-	union directory_block *blk = malloc(sizeof(union directory_block));
-	bzero(blk, BLOCK_SIZE);
-
 	// Checking to see if the directory file already exists.
-	if(find_child_inum(temp, parent) != -1){
+	if(find_child_inum(childPath, parent) != -1){
 		return -EEXIST;
 	}
 
 	// Reserving space for the new directory.
-	int inum = reserve_dir_inode();
+	int childInum = reserve_dir_inode();
 	lba_t data_lba = reserve_data_block();
 	union directory_block *dir_data = malloc_blocks(1);
 	bzero(dir_data, BLOCK_SIZE);
 
 	// init "." for the new directory.
-	dir_data->dirents[0].inum = inum;
+	dir_data->dirents[0].inum = childInum;
 	dir_data->dirents[0].is_valid = 1;
 	strcpy(dir_data->dirents[0].path, ".");
 	dir_data->dirents[0].path_len = strlen(dir_data->dirents[0].path);
@@ -700,65 +753,23 @@ static int refs_mkdir(const char* path, mode_t mode){
 	dir_data->dirents[1].path_len = strlen(dir_data->dirents[1].path);
 
 	// update the inode's direct pointer to point to itself.
-	inode_table[inum].inode.size = 4096;
-	inode_table[inum].inode.blocks = 1;
-	inode_table[inum].inode.block_ptrs[0] = data_lba;
-	inode_table[inum].inode.mode = mode;
+	inode_table[childInum].inode.size = 4096;
+	inode_table[childInum].inode.blocks = 1;
+	inode_table[childInum].inode.block_ptrs[0] = data_lba;
+	inode_table[childInum].inode.mode = mode;
 
 	// Saving changes to the filesystem.
 	write_block(dir_data, data_lba);
 	sync_data_bitmap();
-	write_inode(inum);
+	write_inode(childInum);
 	sync_inode_bitmap();
 
-	// Updating the number of links for the parent inode.
-	parent->n_links += 1;
+	ret = update_parent_inode(childInum, parentInum, childPath);
 
-	// Looking for an open directory in the currently allocated blocks.
-	for(int j = 0; j < parent->blocks; j++){
-		read_block(blk, parent->block_ptrs[j]);
-		for(int n = 0; n < DIRENTS_PER_BLOCK; n++){
-			struct dir_entry *dir = blk->dirents + n;
-			if(!dir->is_valid){
-				dir->is_valid = 1;
-				dir->inum = inum;
-				strcpy(dir->path, temp);
-				dir->path_len = strlen(dir->path);
-				write_block(blk, parent->block_ptrs[j]);
-				free(dup);
-				free(blk);
-				write_inode(parentInum);
-				return 0;
-			}
-		}
-	}
-
-	// Creating a new directory block if required.
-	if(parent->blocks < NUM_DIRECT){
-		parent->blocks += 1;
-		lba_t data2_lba = reserve_data_block();
-		union directory_block *dir2_data = malloc_blocks(1);
-		bzero(dir2_data, BLOCK_SIZE);
-
-		dir2_data->dirents[0].inum = inum;
-		dir2_data->dirents[0].is_valid = 1;
-		strcpy(dir2_data->dirents[0].path, temp);
-		dir2_data->dirents[0].path_len = strlen(dir_data->dirents[0].path);
-
-		write_block(dir2_data, data2_lba);
-		sync_data_bitmap();
-		write_inode(parentInum);
-		free(dup);
-		free(blk);
-		return 0;
-	}
-
-	// Case where we cannot allocate any more directory blocks
-	// for the parent inode.
-	write_inode(parentInum);
 	free(dup);
-	free(blk);
-	return -1;
+	free(dir_data);
+
+	return ret;
 }
 
 /*
@@ -971,6 +982,7 @@ static int refs_mknod(const char * path, mode_t mode, dev_t dev){
 
 	// Case where parent directory doesn't have write permissions.
 	if(refs_access(temp, W_OK)){
+		free(dup);
 		return -EACCES;
 	}
 
@@ -980,6 +992,7 @@ static int refs_mknod(const char * path, mode_t mode, dev_t dev){
 
 	// Case where path is invalid.
 	if(ret  != 0){
+		free(dup);
 		return ret;
 	}
 
@@ -988,81 +1001,37 @@ static int refs_mknod(const char * path, mode_t mode, dev_t dev){
 	// Finding the path to be stored in the new directory.
 	strcpy(dup, path);
 
-	temp = basename(dup);
+	char * childPath = basename(dup);
 
 	// Case where the filename of the new directory is too long.
-	if(strlen(temp) > MAX_PATH_LEN){
+	if(strlen(childPath) > MAX_PATH_LEN){
+		free(dup);
 		return -ENAMETOOLONG;
 	}
 
-	union directory_block *blk = malloc(sizeof(union directory_block));
-	bzero(blk, BLOCK_SIZE);
-
 	// Checking to see if the directory file already exists.
-	if(find_child_inum(temp, parent) != -1){
+	if(find_child_inum(childPath, parent) != -1){
+		free(dup);
 		return -EEXIST;
 	}
 
 	// Reserving space for the new directory.
-	int inum = reserve_regfile_inode();
+	int childInum = reserve_regfile_inode();
 
 	// update the inode's direct pointer to point to itself.
-	inode_table[inum].inode.size = 0;
-	inode_table[inum].inode.blocks = 0;
-	inode_table[inum].inode.mode = mode;
+	inode_table[childInum].inode.size = 0;
+	inode_table[childInum].inode.blocks = 0;
+	inode_table[childInum].inode.mode = mode;
 
 	// Saving changes to the filesystem.
-	write_inode(inum);
+	write_inode(childInum);
 	sync_inode_bitmap();
 
-	// Updating the number of links for the parent inode.
-	parent->n_links += 1;
+	ret = update_parent_inode(childInum, parentInum, childPath);
 
-	// Looking for an open directory in the currently allocated blocks.
-	for(int j = 0; j < parent->blocks; j++){
-		read_block(blk, parent->block_ptrs[j]);
-		for(int n = 0; n < DIRENTS_PER_BLOCK; n++){
-			struct dir_entry *dir = blk->dirents + n;
-			if(!dir->is_valid){
-				dir->is_valid = 1;
-				dir->inum = inum;
-				strcpy(dir->path, temp);
-				dir->path_len = strlen(dir->path);
-				write_block(blk, parent->block_ptrs[j]);
-				free(dup);
-				free(blk);
-				write_inode(parentInum);
-				return 0;
-			}
-		}
-	}
-
-	// Creating a new directory block if required.
-	if(parent->blocks < NUM_DIRECT){
-		parent->blocks += 1;
-		lba_t data2_lba = reserve_data_block();
-		union directory_block *dir2_data = malloc_blocks(1);
-		bzero(dir2_data, BLOCK_SIZE);
-
-		dir2_data->dirents[0].inum = inum;
-		dir2_data->dirents[0].is_valid = 1;
-		strcpy(dir2_data->dirents[0].path, temp);
-		dir2_data->dirents[0].path_len = strlen(dir2_data->dirents[0].path);
-
-		write_block(dir2_data, data2_lba);
-		sync_data_bitmap();
-		write_inode(parentInum);
-		free(dup);
-		free(blk);
-		return 0;
-	}
-
-	// Case where we cannot allocate any more directory blocks
-	// for the parent inode.
-	write_inode(parentInum);
 	free(dup);
-	free(blk);
-	return -1;
+
+	return ret;
 }
 
 
