@@ -1065,8 +1065,41 @@ static int refs_mknod(const char * path, mode_t mode, dev_t dev){
 	return -1;
 }
 
+
+/*
+
+
+ */
 int static refs_create(const char * path, mode_t mode, struct fuse_file_info * file){
 	return refs_mknod(path, mode | S_IFREG, 0);
+}
+
+
+/*
+// When a file is opened, we check for existence and permissions
+// and return either success or an error code.
+*/
+static int refs_open(const char* path, struct fuse_file_info* fi) {
+	int req_mode = 0;
+
+	// Finding the access requirements.
+	if ((fi->flags & O_RDONLY) == O_RDONLY)
+		req_mode |= R_OK;
+	if ((fi->flags & O_WRONLY) == O_WRONLY)
+		req_mode |= W_OK;
+	if ((fi->flags & O_RDWR) == O_RDWR)
+		req_mode |= R_OK | W_OK;
+
+	return access(path, req_mode);
+}
+
+/*
+// Freeing all the temporarily stored information for a file.
+// Since the implemention of the filesystem doesn't use any temporaryily
+// stored information, this function doesn't actually do anything.
+*/
+static int refs_release(const char* path, struct fuse_file_info *fi) {
+	return 0;
 }
 
 
@@ -1081,7 +1114,9 @@ static struct fuse_operations refs_operations = {
 	.mkdir = refs_mkdir,
 	.readdir	= refs_readdir,
 	.mknod = refs_mknod,
-	.create = refs_create
+	.create = refs_create,
+	.release = refs_release,
+	.open = refs_open
 /*
 	.fgetattr	= NULL,
 	.access		= NULL,
