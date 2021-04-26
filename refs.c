@@ -505,6 +505,21 @@ int find_child_inum(char * path, struct refs_inode* ino){
 	return -1;
 }
 
+/*
+//
+//
+*/
+int find_child_inum_abspath(char * path, struct refs_inode * ino){
+	char * dup = strdup(path);
+
+	char * base = basename(dup);
+
+	int ret = find_child_inum(base, ino);
+
+	free(dup);
+
+	return ret;
+}
 
 int get_path_inum(char * path, int * inum){
 
@@ -965,13 +980,147 @@ static int my_hello_truncate(const char *path, off_t size) {
 	return 0;
 }
 
+/*
+// Helper function to determine whether or not a directory is empty. Returns
+// 1 if empty. Otherwise returns 0.
+*/
+static int dir_is_empty(struct refs_inode *dir){
+	union directory_block data;
+
+	for (int i = 0; i < dir->blocks; i++){
+		read_block(&data, dir->block_ptrs[i]);
+
+		int n = 0;
+
+		if(i == 0){
+			n = 2;
+		}
+
+		while(n < DIRENTS_PER_BLOCK){
+				if(data.dirents[n].is_valid){
+						return 0;
+				}
+				n++;
+		}
+	}
+
+	return 1;
+}
+
+static int remove_child(struct refs_inode *parent, struct refs_inode * child, char * path){
+	int ret = 0;
+
+	char * dup = strdup(path);
+
+	if(dup == NULL){
+		return -ENOMEM;
+	}
+
+	char * base = basename(dup);
+
+	union directory_block * current = malloc_blocks(1);
+
+	if(current == NULL){
+		free(dup);
+		return -ENOMEM;
+	}
+
+	bzero(current, BLOCK_SIZE);
+
+	for(int i = 0; i < parent->blocks; i++){
+		ret = read_block(current, parent->block_ptrs[i]);
+
+		if(ret != 1){
+			free(dup);
+			free(current);
+			return -EIO;
+		}
+
+		for(int n = 0; n < DIRENTS_PER_BLOCK; n++){
+			if(current->dirents[n].is_valid &&
+					(strcmp(base, current->dirents[n].path) == 0)){
+
+				current->dirents[n].is_valid = 0;
+
+				ret = write_block(current, parent->block_ptrs[i]);
+
+				free(current);
+				free(dup);
+
+				if (ret != 1){
+					return -EIO;
+				}
+
+				parent->n_links--;
+				write_inode(parent->inum);
+
+				child->n_links--;
+				write_inode(child->inum);
+
+				return 0;
+			}
+		}
+	}
+}
+
+static int do_rmdir(char * path, int parentInum, int childInum){
+
+	struct refs_inode * parentInode = &inode_table[parentInum].inode;
+	struct refs_inode * childInode = &inode_table[childInum].inode;
+
+	// Confirming that the child directory is empty.
+	if(!dir_is_empty(childInode)){
+		return -ENOTEMPTY;
+	}
+
+	// Removing the child from the parent directory
+	int ret = remove_child(parentInode, childInode, path);
+
+	if(ret){
+		return ret;
+	}
+
+	clear_bit(inode_bitmap, childInum);
+
+	for(int i = 0; i < childInode->blocks; i++){
+			clear_bit(data_bitmap, childInode->block_ptrs[i] - super.super.d_region_start);
+	}
+
+	childInode->n_links = 0;
+
+	release_inode(childInode);
+	return 0;
+}
+
 
 static int refs_rmdir(const char * path){
+	int ret = 0;
+	int parentInum = 0;
+	int childInum = 0;
+
+	// Checking to make sure filesystem can reach the parent directory.
+	ret = get_parent_inum((char *) path, &parentInum);
+	if(ret != 0){
+		return ret;
+	}
 
 
 
+	// Checking to make sure target directory exists.
+	struct refs_inode * parentInode = &inode_table[parentInum].inode;
+	childInum = find_child_inum_abspath((char *) path, parentInode);
+	if(childInum == -1){
+		return -ENOENT;
+	}
 
-	return 0;
+	// Checking to make sure path refers to a directory.
+	struct refs_inode *dir_inode = &inode_table[childInum].inode;
+	if (!(dir_inode->flags & INODE_TYPE_DIR)) {
+		return -ENOTDIR;
+	}
+
+
+	return do_rmdir((char *) path, parentInum, childInum);
 }
 
 static int refs_mknod(const char * path, mode_t mode, dev_t dev){
@@ -1085,7 +1234,8 @@ static struct fuse_operations refs_operations = {
 	.mknod = refs_mknod,
 	.create = refs_create,
 	.release = refs_release,
-	.open = refs_open
+	.open = refs_open,
+	.rmdir = refs_rmdir
 /*
 	.fgetattr	= NULL,
 	.access		= NULL,
