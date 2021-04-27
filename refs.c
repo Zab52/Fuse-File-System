@@ -863,7 +863,7 @@ static int min(int a, int b) {
 static void ext_read_blocks(char *buf, int numBlocks, off_t start, struct refs_inode *ino) {
 	if (start < NUM_DIRECT) {
 		int endDirect = min(start + numBlocks - 1, NUM_DIRECT - 1);
-		read_blocks(buf, endDirect - start + 1, start);
+		read_blocks(buf, endDirect - start + 1, ino->block_ptrs[start]);
 		int numReadDirect = NUM_DIRECT - start + 1;
 		
 		// offsetting start, numBlocks, and buf to make code easier
@@ -876,14 +876,67 @@ static void ext_read_blocks(char *buf, int numBlocks, off_t start, struct refs_i
 		for (int i = startIndirect; i < startIndirect + numBlocks; i++) {
 			int indirectBlock = i / BLOCKS_PER_BLOCK;
 			int offsetIndirect = i % BLOCKS_PER_BLOCK;
-			// TODO: read indirect block #indirectBlock at offsetIndirect into buf
+			
+			lba_t *lbas = (lba_t*) *(ino->block_ptrs + NUM_DIRECT + indirectBlock);
+			read_blocks(buf, 1, lbas[offsetIndirect]);
+			
 			buf += BLOCK_SIZE;
 		}
 	}
 }
 
 static void ext_write_blocks(char *buf, int numBlocks, off_t start, struct refs_inode *ino) {
-	// TODO: do the same thing as read lol
+	if (start < NUM_DIRECT) {
+		int endDirect = min(start + numBlocks - 1, NUM_DIRECT - 1);
+		write_blocks(buf, endDirect - start + 1, ino->block_ptrs[start]);
+		int numWriteDirect = NUM_DIRECT - start + 1;
+		
+		// offsetting start, numBlocks, and buf to make code easier
+		numBlocks -= numWriteDirect;
+		start = NUM_DIRECT;
+		buf += numWriteDirect * BLOCK_SIZE;
+	}
+	if (numBlocks > 0) {
+		int startIndirect = start - NUM_DIRECT;
+		for (int i = startIndirect; i < startIndirect + numBlocks; i++) {
+			int indirectBlock = i / BLOCKS_PER_BLOCK;
+			int offsetIndirect = i % BLOCKS_PER_BLOCK;
+			
+			lba_t *lbas = (lba_t*) *(ino->block_ptrs + NUM_DIRECT + indirectBlock);
+			write_blocks(buf, 1, lbas[offsetIndirect]);
+			
+			buf += BLOCK_SIZE;
+		}
+	}
+}
+
+static void ext_reserve_data_block(struct refs_inode *ino) {
+	
+	int numBlocks = ino->blocks;
+	
+	if (numBlocks < NUM_DIRECT) {
+		ino->block_ptrs[numBlocks] = reserve_data_block();
+		ino->blocks++;
+		return;
+	}
+
+	int indirectOffset = (numBlocks - NUM_DIRECT) / (BLOCK_SIZE / sizeof(lba_t));
+	int blockNum = (numBlocks - NUM_DIRECT) % (BLOCK_SIZE / sizeof(lba_t));
+	assert(indirectOffset < NUM_INDIRECT);
+	
+	if (blockNum == 0) {
+		ino->block_ptrs[NUM_DIRECT + indirectOffset] = reserve_data_block();
+	}
+	
+	lba_t *lbas = (lba_t*) *(ino->block_ptrs + NUM_DIRECT + indirectOffset);
+	lbas[blockNum] = reserve_data_block();
+	
+	ino->blocks++;
+
+}
+
+static void ext_release_data_block(struct refs_inode *ino, int blockOffset) {
+	// TODO: release data block at location blockOffset including indirect blocks
 }
 
 static int my_hello_truncate(const char *path, off_t size) {
@@ -916,11 +969,61 @@ static int my_hello_truncate(const char *path, off_t size) {
 	
 	ino = (struct refs_inode *) &(inode_table[inum]).inode;
 	
+	if (ino->size == size) {
+		return 0;
+	}
+	
 	if (ino->size < size) {
 		int firstBlock = ino->size / BLOCK_SIZE;
 		int lastBlock = (size - 1) / BLOCK_SIZE;
 		
 		int byteOffsetBegin = ino->size % BLOCK_SIZE;
+		int byteOffsetEnd = (size - 1) % BLOCK_SIZE + 1;
+		
+		if (firstBlock == lastBlock) {
+			char *block = malloc(sizeof(char) * BLOCK_SIZE);
+			
+			ext_read_blocks(block, 1, firstBlock, ino);
+			fill(block, byteOffsetBegin, byteOffsetEnd - 1, 0);
+			ext_write_blocks(block, 1, firstBlock, ino);
+			
+			free(block);
+		} else {
+		
+			char *blockBegin = malloc(sizeof(char) * BLOCK_SIZE);
+			char *blockEnd = malloc(sizeof(char) * BLOCK_SIZE);
+			
+			ext_read_blocks(blockBegin, 1, firstBlock, ino);
+			fill(blockBegin, byteOffsetBegin, BLOCK_SIZE - 1, 0);
+			ext_write_blocks(blockBegin, 1, firstBlock, ino);
+			
+			int numMiddleBlocks = lastBlock - firstBlock + 1;
+			for (int i = 0; i < numMiddleBlocks; i++) {
+				char *middleBlock = malloc(sizeof(char) * (BLOCK_SIZE));
+				
+				ext_reserve_data_block(ino);
+				
+				// ext_read_blocks(middleBlock, 1, firstBlock + i + 1, ino);
+				fill(middleBlock, 0, BLOCK_SIZE - 1, 0);
+				ext_write_blocks(middleBlock, 1, firstBlock + i + 1, ino);
+				
+				free(middleBlock);
+			}
+			
+			ext_reserve_data_block(ino);
+			
+			ext_read_blocks(blockEnd, 1, lastBlock, ino);
+			fill(blockEnd, 0, byteOffsetEnd - 1, 0);
+			ext_write_blocks(blockEnd, 1, lastBlock, ino);
+			
+			free(blockBegin);
+			free(blockEnd);
+		}
+	} else {
+		int firstBlock = size / BLOCK_SIZE;
+		int lastBlock = (ino->size - 1) / BLOCK_SIZE;
+		
+		int byteOffsetBegin = size % BLOCK_SIZE;
 		int byteOffsetEnd = (ino->size - 1) % BLOCK_SIZE + 1;
 		
 		if (firstBlock == lastBlock) {
@@ -939,31 +1042,39 @@ static int my_hello_truncate(const char *path, off_t size) {
 			fill(blockBegin, byteOffsetBegin, BLOCK_SIZE - 1, 0);
 			ext_write_blocks(blockBegin, 1, firstBlock, ino);
 			
+			int numMiddleBlocks = lastBlock - firstBlock + 1;
+			for (int i = 0; i < numMiddleBlocks; i++) {
+				char *middleBlock = malloc(sizeof(char) * (BLOCK_SIZE));
+				
+				ext_release_data_block(ino, firstBlock + i + 1);
+				
+				ext_read_blocks(middleBlock, 1, firstBlock + i + 1, ino);
+				fill(middleBlock, 0, BLOCK_SIZE - 1, 0);
+				ext_write_blocks(middleBlock, 1, firstBlock + i + 1, ino);
+				
+				free(middleBlock);
+			}
+			
+			ext_release_data_block(ino, lastBlock);
+			
 			ext_read_blocks(blockEnd, 1, lastBlock, ino);
 			fill(blockEnd, 0, byteOffsetEnd - 1, 0);
 			ext_write_blocks(blockEnd, 1, lastBlock, ino);
 			
-			int numMiddleBlocks = lastBlock - firstBlock + 1;
-			if (numMiddleBlocks > 0) {
-				char *blocksInTheMiddle = malloc(sizeof(char) * (BLOCK_SIZE * numMiddleBlocks));
-				
-				ext_read_blocks(blocksInTheMiddle, numMiddleBlocks, firstBlock + 1, ino);
-				fill(blocksInTheMiddle, 0, BLOCK_SIZE * numMiddleBlocks - 1, 0);
-				ext_write_blocks(blocksInTheMiddle, numMiddleBlocks, firstBlock + 1, ino);
-				
-				free(blocksInTheMiddle);
-			}
 			free(blockBegin);
 			free(blockEnd);
 		}
-	} else {
-		// TODO: do the same thing but reversed
 	}
 	
 	ino->size = size;
 	return 0;
 }
 
+static int my_hello_write(const char *path, const char *buf, size_t size,
+		     off_t offset, struct fuse_file_info *fi)
+{
+	
+}
 
 
 // You should implement the functions that you need, but do so in a
@@ -974,7 +1085,8 @@ static struct fuse_operations refs_operations = {
 	.getattr	= refs_getattr,
 	.access = refs_access,
 	.mkdir = refs_mkdir,
-	.readdir	= refs_readdir
+	.readdir	= refs_readdir,
+	.truncate	= my_hello_truncate
 /*
 	.fgetattr	= NULL,
 	.access		= NULL,
@@ -989,7 +1101,6 @@ static struct fuse_operations refs_operations = {
 	.link		= NULL,
 	.chmod		= NULL,
 	.chown		= NULL,
-	.truncate	= NULL,
 	.utimens	= NULL,
 	.open		= NULL,
 	.read		= NULL,
