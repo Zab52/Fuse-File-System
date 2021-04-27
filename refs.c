@@ -995,6 +995,10 @@ static int refs_truncate(const char *path, off_t size) {
 
 		int byteOffsetBegin = ino->size % BLOCK_SIZE;
 		int byteOffsetEnd = (size - 1) % BLOCK_SIZE + 1;
+		
+		if (byteOffsetBegin == 0) {
+			ext_release_data_block(ino);
+		}
 
 		if (firstBlock == lastBlock) {
 			char *block = malloc(sizeof(char) * BLOCK_SIZE);
@@ -1041,6 +1045,10 @@ static int refs_truncate(const char *path, off_t size) {
 		
 		int byteOffsetBegin = size % BLOCK_SIZE;
 		int byteOffsetEnd = (ino->size - 1) % BLOCK_SIZE + 1;
+		
+		if (byteOffsetBegin == 0) {
+			ext_release_data_block(ino);
+		}
 		
 		if (firstBlock == lastBlock) {
 			char *block = malloc(sizeof(char) * BLOCK_SIZE);
@@ -1090,7 +1098,7 @@ static int refs_truncate(const char *path, off_t size) {
 static int refs_write(const char *path, const char *buf, size_t size,
 		     off_t offset, struct fuse_file_info *fi)
 {
-/*
+
 	struct refs_inode *ino;
 
 	int ret = 0;
@@ -1120,46 +1128,46 @@ static int refs_write(const char *path, const char *buf, size_t size,
 
 	int byteOffsetBegin = offset % BLOCK_SIZE;
 	int byteOffsetEnd = (ino->size - 1) % BLOCK_SIZE + 1;
-	=
+	
 	if (firstBlock == lastBlock) {
 		char *block = malloc(sizeof(char) * BLOCK_SIZE);
 
 		ext_read_blocks(block, 1, firstBlock, ino);
-		fill(block, byteOffsetBegin, byteOffsetEnd - 1, 0);
+		strncpy(block + byteOffsetBegin, buf, byteOffsetEnd - byteOffsetBegin);
 		ext_write_blocks(block, 1, firstBlock, ino);
 
 		free(block);
 	} else {
-
+		int currentBufOffset = 0;
+		
 		char *blockBegin = malloc(sizeof(char) * BLOCK_SIZE);
 		char *blockEnd = malloc(sizeof(char) * BLOCK_SIZE);
 
 		ext_read_blocks(blockBegin, 1, firstBlock, ino);
-		fill(blockBegin, byteOffsetBegin, BLOCK_SIZE - 1, 0);
-		ext_write_blocks(blockBegin, 1, firstBlock, ino);=
+		strncpy(blockBegin + byteOffsetBegin, buf, BLOCK_SIZE - byteOffsetBegin);
+		ext_write_blocks(blockBegin, 1, firstBlock, ino);
+		
+		currentBufOffset = BLOCK_SIZE - byteOffsetBegin;
 		
 		int numMiddleBlocks = lastBlock - firstBlock + 1;
 		for (int i = 0; i < numMiddleBlocks; i++) {
 			char *middleBlock = malloc(sizeof(char) * (BLOCK_SIZE));
 			
-			ext_reserve_data_block(ino);
-			
-			fill(middleBlock, 0, BLOCK_SIZE - 1, 0);
+			strncpy(middleBlock, buf + currentBufOffset, BLOCK_SIZE);
 			ext_write_blocks(middleBlock, 1, firstBlock + i + 1, ino);
 			
 			free(middleBlock);
+			currentBufOffset += BLOCK_SIZE;
 		}
 		
-		ext_reserve_data_block(ino);
 		
 		ext_read_blocks(blockEnd, 1, lastBlock, ino);
-		fill(blockEnd, 0, byteOffsetEnd - 1, 0);
+		strncpy(blockEnd, buf + currentBufOffset, byteOffsetEnd);
 		ext_write_blocks(blockEnd, 1, lastBlock, ino);
 		
 		free(blockBegin);
 		free(blockEnd);
 	}
-	*/
 	return 0;
 }
 
