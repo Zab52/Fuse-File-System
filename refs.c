@@ -233,6 +233,13 @@ static int reserve_dir_inode() {
 	return inum;
 }
 
+static int reserve_regfile_inode(){
+	uint64_t inum = reserve_inode();
+	inode_table[inum].inode.flags |= INODE_TYPE_REG;
+	inode_table[inum].inode.n_links = 1;
+	return inum;
+}
+
 /**
  * Called only once during FS initialization:
  *   allocates inode 0 for `/`
@@ -270,7 +277,7 @@ static int alloc_root_dir() {
 	inode_table[inum].inode.size = 4096;
 	inode_table[inum].inode.blocks = 1;
 	inode_table[inum].inode.block_ptrs[0] = data_lba;
-	inode_table[inum].inode.permissions = 0775;
+	inode_table[inum].inode.mode = 0775;
 
 	// write the directory contents to its data block
 	write_block(root_data, data_lba);
@@ -458,7 +465,7 @@ static void* refs_init(struct fuse_conn_info *conn) {
 // This function deallocates each of the global variables stored within the FS,
 // and closes the file that is acting as the harddrive.
 */
-static void refs_destroy(struct fuse_conn_info *conn){
+static void refs_destroy(void *conn){
 
 	free(inode_table);
 	free_bitmap(inode_bitmap);
@@ -499,28 +506,35 @@ int find_child_inum(char * path, struct refs_inode* ino){
 }
 
 /*
-// A helper function that finds the parent inode given a directory specified
-// by a path. This function then returns the inode number of this parent inode.
-// Returns -1 if the parent inode isn't found.
+//
+//
 */
-int get_parent_inum(char * path){
-	struct refs_inode * current;
-	char * dup = malloc(sizeof(char) * strlen(path));
-	strcpy(dup, path);
+int find_child_inum_abspath(char * path, struct refs_inode * ino){
+	char * dup = strdup(path);
 
-	// Retrieving the parent directories path.
-	char * parentPath = dirname(dup);
+	char * base = basename(dup);
+
+	int ret = find_child_inum(base, ino);
+
+	free(dup);
+
+	return ret;
+}
+
+int get_path_inum(char * path, int * inum){
+
+	struct refs_inode * current;
 
 	// Tokenizing the path name.
   char delem[2] = "/";
-	char * temp = strtok(parentPath + 1, delem);
+	char * temp = strtok(path + 1, delem);
 
 
-	int inum = 0;
+  * inum = 0;
 
 	// Searching through each inode starting from the root for the next token.
 	while(temp != NULL){
-		current = (struct refs_inode *) &(inode_table[inum]).inode;
+		current = (struct refs_inode *) &(inode_table[*inum]).inode;
 
 		// Case where an inode on the path isn't a directory inode.
 		if(!(current->flags & INODE_TYPE_DIR)){
@@ -528,20 +542,36 @@ int get_parent_inum(char * path){
 		}
 
 		// Finding the inode number of the next inode in the path.
-		inum = find_child_inum(temp, current);
+		*inum = find_child_inum(temp, current);
 
 		// Case where the inode isn't found.
-		if(inum == -1){
-			free(dup);
-			return -1;
+		if(*inum == -1){
+			return -ENOENT;
 		}
 
 		temp = strtok(NULL, delem);
 	}
 
-	free(dup);
-	return inum;
+	return 0;
 }
+
+/*
+// A helper function that finds the parent inode given a directory specified
+// by a path. This function then returns the inode number of this parent inode.
+// Returns -1 if the parent inode isn't found.
+*/
+int get_parent_inum(char * path, int * inum){
+	char * dup = malloc(sizeof(char) * strlen(path));
+	strcpy(dup, path);
+
+	// Retrieving the parent directories path.
+	char * parentPath = dirname(dup);
+
+	int ret =  get_path_inum(parentPath, inum);
+	free(dup);
+	return ret;
+}
+
 
 /*
 // Given a path, this function finds the paths corresponding inode, and then
@@ -554,31 +584,22 @@ static int refs_getattr(const char * path, struct stat* stbuf){
 
 	struct refs_inode* res;
 
+	int inum = 0;
+	int ret = 0;
+
 	// Checking to make sure the path isn't just the root path.
 	if(strcmp(path, "/")){
 
 		strcpy(dup, path);
 
-		char * base = basename(dup);
-
 		// Getting the parent inode number of the path.
-		int inum = get_parent_inum((char *) path);
-
-		// Case where inodes doesn't exist for the parent path.
-		if (inum == -1) {
-			return -ENOENT;
-		}
-
-		res = (struct refs_inode *) &(inode_table[inum]).inode;
-
-		// Finding the desired inode number for the path
-		inum = find_child_inum(base, res);
+		ret = get_path_inum((char *) path, &inum);
 
 		free(dup);
 
-		// Case where the inode doesn't exist for this path.
-		if (inum == -1) {
-			return -ENOENT;
+		// Case where inodes doesn't exist for the parent path.
+		if (ret != 0) {
+			return ret;
 		}
 
 		res = (struct refs_inode*) &(inode_table[inum]).inode;
@@ -593,9 +614,9 @@ static int refs_getattr(const char * path, struct stat* stbuf){
 	stbuf->st_blocks = res->blocks;
 
 	if(res->flags & INODE_TYPE_DIR){
-		stbuf->st_mode = res->permissions | S_IFDIR;
+		stbuf->st_mode = res->mode | S_IFDIR;
 	} else if (res->flags & INODE_TYPE_REG){
-		stbuf->st_mode = res->permissions | S_IFREG;
+		stbuf->st_mode = res->mode | S_IFREG;
 	} else{
 		printf("Unknown File type");
 	}
@@ -628,80 +649,12 @@ static int refs_access(const char *path, int mask){
 	return -1;
 }
 
-/*
-// This function creates a new directory at the specified path location, setting
-// the permissions to mode. If succesful, this function returns 0. Otherwise,
-// returns -1.
-*/
-static int refs_mkdir(const char* path, mode_t mode){
-
-	char * dup = malloc(sizeof(char) * strlen(path));
-	strcpy(dup, path);
-
-	char * temp = dirname(dup);
-
-	// Case where parent directory doesn't have write permissions.
-	if(refs_access(temp, W_OK)){
-		return -EACCES;
-	}
-
-	// Finding the parent inode number of the path,
-	int parentInum = get_parent_inum((char *) path);
-
-	// Case where path is invalid.
-	if(parentInum == -1){
-		return -ENOENT;
-	}
+static int update_parent_inode(int childInum, int parentInum, char * childPath){
 
 	struct refs_inode* parent = (struct refs_inode *) &(inode_table[parentInum]).inode;
 
-	// Finding the path to be stored in the new directory.
-	strcpy(dup, path);
-
-	temp = basename(dup);
-
-	// Case where the filename of the new directory is too long.
-	if(strlen(temp) > MAX_PATH_LEN){
-		return -ENAMETOOLONG;
-	}
-
 	union directory_block *blk = malloc(sizeof(union directory_block));
 	bzero(blk, BLOCK_SIZE);
-
-	// Checking to see if the directory file already exists.
-	if(find_child_inum(temp, parent) != -1){
-		return -EEXIST;
-	}
-
-	// Reserving space for the new directory.
-	int inum = reserve_dir_inode();
-	lba_t data_lba = reserve_data_block();
-	union directory_block *dir_data = malloc_blocks(1);
-	bzero(dir_data, BLOCK_SIZE);
-
-	// init "." for the new directory.
-	dir_data->dirents[0].inum = inum;
-	dir_data->dirents[0].is_valid = 1;
-	strcpy(dir_data->dirents[0].path, ".");
-	dir_data->dirents[0].path_len = strlen(dir_data->dirents[0].path);
-
-	// init ".." for the new directory.
-	dir_data->dirents[1].inum = parentInum;
-	dir_data->dirents[1].is_valid = 1;
-	strcpy(dir_data->dirents[1].path, "..");
-	dir_data->dirents[1].path_len = strlen(dir_data->dirents[1].path);
-
-	// update the inode's direct pointer to point to itself.
-	inode_table[inum].inode.size = 4096;
-	inode_table[inum].inode.blocks = 1;
-	inode_table[inum].inode.block_ptrs[0] = data_lba;
-	inode_table[inum].inode.permissions = mode;
-
-	// Saving changes to the filesystem.
-	write_block(dir_data, data_lba);
-	sync_data_bitmap();
-	write_inode(inum);
-	sync_inode_bitmap();
 
 	// Updating the number of links for the parent inode.
 	parent->n_links += 1;
@@ -713,11 +666,10 @@ static int refs_mkdir(const char* path, mode_t mode){
 			struct dir_entry *dir = blk->dirents + n;
 			if(!dir->is_valid){
 				dir->is_valid = 1;
-				dir->inum = inum;
-				strcpy(dir->path, temp);
+				dir->inum = childInum;
+				strcpy(dir->path, childPath);
 				dir->path_len = strlen(dir->path);
 				write_block(blk, parent->block_ptrs[j]);
-				free(dup);
 				free(blk);
 				write_inode(parentInum);
 				return 0;
@@ -728,29 +680,111 @@ static int refs_mkdir(const char* path, mode_t mode){
 	// Creating a new directory block if required.
 	if(parent->blocks < NUM_DIRECT){
 		parent->blocks += 1;
-		lba_t data2_lba = reserve_data_block();
-		union directory_block *dir2_data = malloc_blocks(1);
-		bzero(dir2_data, BLOCK_SIZE);
+		parent->size += 4096;
 
-		dir2_data->dirents[0].inum = inum;
-		dir2_data->dirents[0].is_valid = 1;
-		strcpy(dir2_data->dirents[0].path, temp);
-		dir2_data->dirents[0].path_len = strlen(dir_data->dirents[0].path);
+		lba_t data_lba = reserve_data_block();
+		bzero(blk, BLOCK_SIZE);
 
-		write_block(dir2_data, data2_lba);
+		blk->dirents[0].inum = childInum;
+		blk->dirents[0].is_valid = 1;
+		strcpy(blk->dirents[0].path, childPath);
+		blk->dirents[0].path_len = strlen(blk->dirents[0].path);
+
+		write_block(blk, data_lba);
 		sync_data_bitmap();
 		write_inode(parentInum);
-		free(dup);
 		free(blk);
 		return 0;
 	}
 
 	// Case where we cannot allocate any more directory blocks
 	// for the parent inode.
+	parent->n_links -= 1;
 	write_inode(parentInum);
-	free(dup);
 	free(blk);
 	return -1;
+}
+
+/*
+// This function creates a new directory at the specified path location, setting
+// the mode to mode. If succesful, this function returns 0. Otherwise,
+// returns -1.
+*/
+static int refs_mkdir(const char* path, mode_t mode){
+
+	char * dup = malloc(sizeof(char) * strlen(path));
+	strcpy(dup, path);
+
+	char * temp = dirname(dup);
+	int parentInum = 0;
+	int ret = 0;
+
+	// Case where parent directory doesn't have write mode.
+	if(refs_access(temp, W_OK)){
+		return -EACCES;
+	}
+
+	// Finding the parent inode number of the path,
+	ret = get_parent_inum((char *) path, &parentInum);
+
+	// Case where path is invalid.
+	if(ret != 0){
+		return ret;
+	}
+
+	struct refs_inode* parent = (struct refs_inode *) &(inode_table[parentInum]).inode;
+
+	// Finding the path to be stored in the new directory.
+	strcpy(dup, path);
+
+	char * childPath = basename(dup);
+
+	// Case where the filename of the new directory is too long.
+	if(strlen(childPath) > MAX_PATH_LEN){
+		return -ENAMETOOLONG;
+	}
+
+	// Checking to see if the directory file already exists.
+	if(find_child_inum(childPath, parent) != -1){
+		return -EEXIST;
+	}
+
+	// Reserving space for the new directory.
+	int childInum = reserve_dir_inode();
+	lba_t data_lba = reserve_data_block();
+	union directory_block *dir_data = malloc_blocks(1);
+	bzero(dir_data, BLOCK_SIZE);
+
+	// init "." for the new directory.
+	dir_data->dirents[0].inum = childInum;
+	dir_data->dirents[0].is_valid = 1;
+	strcpy(dir_data->dirents[0].path, ".");
+	dir_data->dirents[0].path_len = strlen(dir_data->dirents[0].path);
+
+	// init ".." for the new directory.
+	dir_data->dirents[1].inum = parentInum;
+	dir_data->dirents[1].is_valid = 1;
+	strcpy(dir_data->dirents[1].path, "..");
+	dir_data->dirents[1].path_len = strlen(dir_data->dirents[1].path);
+
+	// update the inode's direct pointer to point to itself.
+	inode_table[childInum].inode.size = 4096;
+	inode_table[childInum].inode.blocks = 1;
+	inode_table[childInum].inode.block_ptrs[0] = data_lba;
+	inode_table[childInum].inode.mode = mode;
+
+	// Saving changes to the filesystem.
+	write_block(dir_data, data_lba);
+	sync_data_bitmap();
+	write_inode(childInum);
+	sync_inode_bitmap();
+
+	ret = update_parent_inode(childInum, parentInum, childPath);
+
+	free(dup);
+	free(dir_data);
+
+	return ret;
 }
 
 /*
@@ -765,6 +799,8 @@ static int refs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 			 off_t offset, struct fuse_file_info *fi) {
 
 	struct refs_inode* res;
+	int inum = 0;
+	int ret = 0;
 
 	// Case where the path isn't the root path.
 	if(strcmp(path, "/")){
@@ -773,27 +809,15 @@ static int refs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 
 		strcpy(dup, path);
 
-		char * base = basename(dup);
-
 		// Finding the parent inode number of the path.
-		int parentInum = get_parent_inum((char *) path);
-
-		// Case where the path isn't valid.
-		if(parentInum == -1){
-			return -ENOENT;
-		}
-
-		res = (struct refs_inode *) &inode_table[parentInum].inode;
-
-		// Finding the inode number of the path.
-		int inum = find_child_inum(base, res);
-
-		// Case where the path isn't valid.
-		if(inum == -1){
-			return -ENOENT;
-		}
+		ret = get_path_inum((char *) path, &inum);
 
 		free(dup);
+
+		// Case where the path isn't valid.
+		if(ret != 0){
+			return ret;
+		}
 
 		res = (struct refs_inode *) &inode_table[inum].inode;
 	} else {
@@ -865,7 +889,7 @@ static void ext_read_blocks(char *buf, int numBlocks, off_t start, struct refs_i
 		int endDirect = min(start + numBlocks - 1, NUM_DIRECT - 1);
 		read_blocks(buf, endDirect - start + 1, ino->block_ptrs[start]);
 		int numReadDirect = NUM_DIRECT - start + 1;
-		
+
 		// offsetting start, numBlocks, and buf to make code easier
 		numBlocks -= numReadDirect;
 		start = NUM_DIRECT;
@@ -939,34 +963,26 @@ static void ext_release_data_block(struct refs_inode *ino, int blockOffset) {
 	// TODO: release data block at location blockOffset including indirect blocks
 }
 
-static int my_hello_truncate(const char *path, off_t size) {
+static int refs_truncate(const char *path, off_t size) {
 
 	struct refs_inode *ino;
-	
-	// Case where file doesn't have write permissions.
+
+	int ret = 0;
+	int inum = 0;
+
+	// Case where file doesn't have write mode.
 	if(refs_access(path, W_OK)){
 		return -EACCES;
 	}
 
 	// Getting the parent inode number of the path.
-	int inum = get_parent_inum((char *) path);
+	ret = get_path_inum((char *) path, &inum);
 
 	// Case where inodes doesn't exist for the parent path.
-	if (inum == -1) {
-		return -ENOENT;
+	if (ret == -1) {
+		return ret;
 	}
 
-	ino = (struct refs_inode *) &(inode_table[inum]).inode;
-
-	// Finding the desired inode number for the path
-	char * base = basename(path);
-	inum = find_child_inum(base, ino);
-
-	// Case where the inode doesn't exist for this path.
-	if (inum == -1) {
-		return -ENOENT;
-	}
-	
 	ino = (struct refs_inode *) &(inode_table[inum]).inode;
 	
 	if (ino->size == size) {
@@ -976,23 +992,23 @@ static int my_hello_truncate(const char *path, off_t size) {
 	if (ino->size < size) {
 		int firstBlock = ino->size / BLOCK_SIZE;
 		int lastBlock = (size - 1) / BLOCK_SIZE;
-		
+
 		int byteOffsetBegin = ino->size % BLOCK_SIZE;
 		int byteOffsetEnd = (size - 1) % BLOCK_SIZE + 1;
-		
+
 		if (firstBlock == lastBlock) {
 			char *block = malloc(sizeof(char) * BLOCK_SIZE);
-			
+
 			ext_read_blocks(block, 1, firstBlock, ino);
 			fill(block, byteOffsetBegin, byteOffsetEnd - 1, 0);
 			ext_write_blocks(block, 1, firstBlock, ino);
-			
+
 			free(block);
 		} else {
 		
 			char *blockBegin = malloc(sizeof(char) * BLOCK_SIZE);
 			char *blockEnd = malloc(sizeof(char) * BLOCK_SIZE);
-			
+
 			ext_read_blocks(blockBegin, 1, firstBlock, ino);
 			fill(blockBegin, byteOffsetBegin, BLOCK_SIZE - 1, 0);
 			ext_write_blocks(blockBegin, 1, firstBlock, ino);
@@ -1048,7 +1064,7 @@ static int my_hello_truncate(const char *path, off_t size) {
 				
 				ext_release_data_block(ino, firstBlock + i + 1);
 				
-				ext_read_blocks(middleBlock, 1, firstBlock + i + 1, ino);
+				// ext_read_blocks(middleBlock, 1, firstBlock + i + 1, ino);
 				fill(middleBlock, 0, BLOCK_SIZE - 1, 0);
 				ext_write_blocks(middleBlock, 1, firstBlock + i + 1, ino);
 				
@@ -1065,15 +1081,326 @@ static int my_hello_truncate(const char *path, off_t size) {
 			free(blockEnd);
 		}
 	}
-	
+
 	ino->size = size;
 	return 0;
 }
 
-static int my_hello_write(const char *path, const char *buf, size_t size,
+
+static int refs_write(const char *path, const char *buf, size_t size,
 		     off_t offset, struct fuse_file_info *fi)
 {
+/*
+	struct refs_inode *ino;
+
+	int ret = 0;
+	int inum = 0;
+
+	// Case where file doesn't have write mode.
+	if(refs_access(path, W_OK)){
+		return -EACCES;
+	}
+
+	// Getting the parent inode number of the path.
+	ret = get_path_inum((char *) path, &inum);
+
+	// Case where inodes doesn't exist for the parent path.
+	if (ret == -1) {
+		return ret;
+	}
+
+	ino = (struct refs_inode *) &(inode_table[inum]).inode;
 	
+	if (size + offset >= ino->size) {
+		refs_truncate(path, size + offset);
+	}
+	
+	int firstBlock = offset / BLOCK_SIZE;
+	int lastBlock = (ino->size - 1) / BLOCK_SIZE;
+
+	int byteOffsetBegin = offset % BLOCK_SIZE;
+	int byteOffsetEnd = (ino->size - 1) % BLOCK_SIZE + 1;
+	=
+	if (firstBlock == lastBlock) {
+		char *block = malloc(sizeof(char) * BLOCK_SIZE);
+
+		ext_read_blocks(block, 1, firstBlock, ino);
+		fill(block, byteOffsetBegin, byteOffsetEnd - 1, 0);
+		ext_write_blocks(block, 1, firstBlock, ino);
+
+		free(block);
+	} else {
+
+		char *blockBegin = malloc(sizeof(char) * BLOCK_SIZE);
+		char *blockEnd = malloc(sizeof(char) * BLOCK_SIZE);
+
+		ext_read_blocks(blockBegin, 1, firstBlock, ino);
+		fill(blockBegin, byteOffsetBegin, BLOCK_SIZE - 1, 0);
+		ext_write_blocks(blockBegin, 1, firstBlock, ino);=
+		
+		int numMiddleBlocks = lastBlock - firstBlock + 1;
+		for (int i = 0; i < numMiddleBlocks; i++) {
+			char *middleBlock = malloc(sizeof(char) * (BLOCK_SIZE));
+			
+			ext_reserve_data_block(ino);
+			
+			fill(middleBlock, 0, BLOCK_SIZE - 1, 0);
+			ext_write_blocks(middleBlock, 1, firstBlock + i + 1, ino);
+			
+			free(middleBlock);
+		}
+		
+		ext_reserve_data_block(ino);
+		
+		ext_read_blocks(blockEnd, 1, lastBlock, ino);
+		fill(blockEnd, 0, byteOffsetEnd - 1, 0);
+		ext_write_blocks(blockEnd, 1, lastBlock, ino);
+		
+		free(blockBegin);
+		free(blockEnd);
+	}
+	*/
+	return 0;
+}
+
+/*
+// Helper function to determine whether or not a directory is empty. Returns
+// 1 if empty. Otherwise returns 0.
+*/
+static int dir_is_empty(struct refs_inode *dir){
+	union directory_block data;
+
+	for (int i = 0; i < dir->blocks; i++){
+		read_block(&data, dir->block_ptrs[i]);
+
+		int n = 0;
+
+		if(i == 0){
+			n = 2;
+		}
+
+		while(n < DIRENTS_PER_BLOCK){
+				if(data.dirents[n].is_valid){
+						return 0;
+				}
+				n++;
+		}
+	}
+
+	return 1;
+}
+
+static int remove_child(struct refs_inode *parent, struct refs_inode * child, char * path){
+	int ret = 0;
+
+	char * dup = strdup(path);
+
+	if(dup == NULL){
+		return -ENOMEM;
+	}
+
+	char * base = basename(dup);
+
+	union directory_block * current = malloc_blocks(1);
+
+	if(current == NULL){
+		free(dup);
+		return -ENOMEM;
+	}
+
+	bzero(current, BLOCK_SIZE);
+
+	for(int i = 0; i < parent->blocks; i++){
+		ret = read_block(current, parent->block_ptrs[i]);
+
+		if(ret != 1){
+			free(dup);
+			free(current);
+			return -EIO;
+		}
+
+		for(int n = 0; n < DIRENTS_PER_BLOCK; n++){
+			if(current->dirents[n].is_valid &&
+					(strcmp(base, current->dirents[n].path) == 0)){
+
+				current->dirents[n].is_valid = 0;
+
+				ret = write_block(current, parent->block_ptrs[i]);
+
+				free(current);
+				free(dup);
+
+				if (ret != 1){
+					return -EIO;
+				}
+
+				parent->n_links--;
+				write_inode(parent->inum);
+
+				child->n_links--;
+				write_inode(child->inum);
+
+				return 0;
+			}
+		}
+	}
+}
+
+static int do_rmdir(char * path, int parentInum, int childInum){
+
+	struct refs_inode * parentInode = &inode_table[parentInum].inode;
+	struct refs_inode * childInode = &inode_table[childInum].inode;
+
+	// Confirming that the child directory is empty.
+	if(!dir_is_empty(childInode)){
+		return -ENOTEMPTY;
+	}
+
+	// Removing the child from the parent directory
+	int ret = remove_child(parentInode, childInode, path);
+
+	if(ret){
+		return ret;
+	}
+
+	clear_bit(inode_bitmap, childInum);
+
+	for(int i = 0; i < childInode->blocks; i++){
+			clear_bit(data_bitmap, childInode->block_ptrs[i] - super.super.d_region_start);
+	}
+
+	childInode->n_links = 0;
+
+	release_inode(childInode);
+	return 0;
+}
+
+
+static int refs_rmdir(const char * path){
+	int ret = 0;
+	int parentInum = 0;
+	int childInum = 0;
+
+	// Checking to make sure filesystem can reach the parent directory.
+	ret = get_parent_inum((char *) path, &parentInum);
+	if(ret != 0){
+		return ret;
+	}
+
+
+
+	// Checking to make sure target directory exists.
+	struct refs_inode * parentInode = &inode_table[parentInum].inode;
+	childInum = find_child_inum_abspath((char *) path, parentInode);
+	if(childInum == -1){
+		return -ENOENT;
+	}
+
+	// Checking to make sure path refers to a directory.
+	struct refs_inode *dir_inode = &inode_table[childInum].inode;
+	if (!(dir_inode->flags & INODE_TYPE_DIR)) {
+		return -ENOTDIR;
+	}
+
+
+	return do_rmdir((char *) path, parentInum, childInum);
+}
+
+static int refs_mknod(const char * path, mode_t mode, dev_t dev){
+	char * dup = malloc(sizeof(char) * strlen(path));
+	strcpy(dup, path);
+
+	char * temp = dirname(dup);
+
+	// Case where parent directory doesn't have write permissions.
+	if(refs_access(temp, W_OK)){
+		free(dup);
+		return -EACCES;
+	}
+
+	// Finding the parent inode number of the path,
+	int parentInum = 0;
+	int ret = get_parent_inum((char *) path, &parentInum);
+
+	// Case where path is invalid.
+	if(ret  != 0){
+		free(dup);
+		return ret;
+	}
+
+	struct refs_inode* parent = (struct refs_inode *) &(inode_table[parentInum]).inode;
+
+	// Finding the path to be stored in the new directory.
+	strcpy(dup, path);
+
+	char * childPath = basename(dup);
+
+	// Case where the filename of the new directory is too long.
+	if(strlen(childPath) > MAX_PATH_LEN){
+		free(dup);
+		return -ENAMETOOLONG;
+	}
+
+	// Checking to see if the directory file already exists.
+	if(find_child_inum(childPath, parent) != -1){
+		free(dup);
+		return -EEXIST;
+	}
+
+	// Reserving space for the new directory.
+	int childInum = reserve_regfile_inode();
+
+	// update the inode's direct pointer to point to itself.
+	inode_table[childInum].inode.size = 0;
+	inode_table[childInum].inode.blocks = 0;
+	inode_table[childInum].inode.mode = mode;
+
+	// Saving changes to the filesystem.
+	write_inode(childInum);
+	sync_inode_bitmap();
+
+	ret = update_parent_inode(childInum, parentInum, childPath);
+
+	free(dup);
+
+	return ret;
+}
+
+
+/*
+
+
+ */
+int static refs_create(const char * path, mode_t mode, struct fuse_file_info * file){
+	return refs_mknod(path, mode | S_IFREG, 0);
+}
+
+
+/*
+// When a file is opened, we check for existence and permissions
+// and return either success or an error code.
+*/
+static int refs_open(const char* path, struct fuse_file_info* fi) {
+	int req_mode = 0;
+
+	// Finding the access requirements.
+	if ((fi->flags & O_RDONLY) == O_RDONLY)
+		req_mode |= R_OK;
+	if ((fi->flags & O_WRONLY) == O_WRONLY)
+		req_mode |= W_OK;
+	if ((fi->flags & O_RDWR) == O_RDWR)
+		req_mode |= R_OK | W_OK;
+
+	return access(path, req_mode);
+}
+
+/*
+// Freeing all the temporarily stored information for a file.
+// Since the implemention of the filesystem doesn't use any temporaryily
+// stored information, this function doesn't actually do anything.
+*/
+static int refs_release(const char* path, struct fuse_file_info *fi) {
+	return 0;
 }
 
 
@@ -1086,7 +1413,13 @@ static struct fuse_operations refs_operations = {
 	.access = refs_access,
 	.mkdir = refs_mkdir,
 	.readdir	= refs_readdir,
-	.truncate	= my_hello_truncate
+	.truncate	= refs_truncate
+	.mknod = refs_mknod,
+	.create = refs_create,
+	.release = refs_release,
+	.open = refs_open,
+	.rmdir = refs_rmdir,
+	.write		= refs_write,
 /*
 	.fgetattr	= NULL,
 	.access		= NULL,
@@ -1104,7 +1437,6 @@ static struct fuse_operations refs_operations = {
 	.utimens	= NULL,
 	.open		= NULL,
 	.read		= NULL,
-	.write		= NULL,
 	.statfs		= NULL,
 	.release	= NULL,
 	.fsync		= NULL,

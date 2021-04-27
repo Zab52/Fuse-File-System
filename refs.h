@@ -66,7 +66,7 @@ union superblock {
  */
 struct refs_inode {
 	char flags;
-  uint16_t permissions;
+  uint16_t mode;
 	uint16_t n_links;
 	uint64_t inum;
 	uint64_t size;
