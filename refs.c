@@ -959,7 +959,7 @@ static void ext_reserve_data_block(struct refs_inode *ino) {
 
 }
 
-static void ext_release_data_block(struct refs_inode *ino, int blockOffset) {
+static void ext_release_data_block(struct refs_inode *ino) {
 	// TODO: release data block at location blockOffset including indirect blocks
 }
 
@@ -1070,7 +1070,7 @@ static int refs_truncate(const char *path, off_t size) {
 			for (int i = 0; i < numMiddleBlocks; i++) {
 				char *middleBlock = malloc(sizeof(char) * (BLOCK_SIZE));
 				
-				ext_release_data_block(ino, firstBlock + i + 1);
+				ext_release_data_block(ino);
 				
 				// ext_read_blocks(middleBlock, 1, firstBlock + i + 1, ino);
 				fill(middleBlock, 0, BLOCK_SIZE - 1, 0);
@@ -1079,7 +1079,7 @@ static int refs_truncate(const char *path, off_t size) {
 				free(middleBlock);
 			}
 			
-			ext_release_data_block(ino, lastBlock);
+			ext_release_data_block(ino);
 			
 			ext_read_blocks(blockEnd, 1, lastBlock, ino);
 			fill(blockEnd, 0, byteOffsetEnd - 1, 0);
