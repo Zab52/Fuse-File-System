@@ -900,10 +900,10 @@ static void ext_read_blocks(char *buf, int numBlocks, off_t start, struct refs_i
 		for (int i = startIndirect; i < startIndirect + numBlocks; i++) {
 			int indirectBlock = i / BLOCKS_PER_BLOCK;
 			int offsetIndirect = i % BLOCKS_PER_BLOCK;
-			
+
 			lba_t *lbas = (lba_t*) *(ino->block_ptrs + NUM_DIRECT + indirectBlock);
 			read_blocks(buf, 1, lbas[offsetIndirect]);
-			
+
 			buf += BLOCK_SIZE;
 		}
 	}
@@ -914,7 +914,7 @@ static void ext_write_blocks(char *buf, int numBlocks, off_t start, struct refs_
 		int endDirect = min(start + numBlocks - 1, NUM_DIRECT - 1);
 		write_blocks(buf, endDirect - start + 1, ino->block_ptrs[start]);
 		int numWriteDirect = NUM_DIRECT - start + 1;
-		
+
 		// offsetting start, numBlocks, and buf to make code easier
 		numBlocks -= numWriteDirect;
 		start = NUM_DIRECT;
@@ -925,19 +925,19 @@ static void ext_write_blocks(char *buf, int numBlocks, off_t start, struct refs_
 		for (int i = startIndirect; i < startIndirect + numBlocks; i++) {
 			int indirectBlock = i / BLOCKS_PER_BLOCK;
 			int offsetIndirect = i % BLOCKS_PER_BLOCK;
-			
+
 			lba_t *lbas = (lba_t*) *(ino->block_ptrs + NUM_DIRECT + indirectBlock);
 			write_blocks(buf, 1, lbas[offsetIndirect]);
-			
+
 			buf += BLOCK_SIZE;
 		}
 	}
 }
 
 static void ext_reserve_data_block(struct refs_inode *ino) {
-	
+
 	int numBlocks = ino->blocks;
-	
+
 	if (numBlocks < NUM_DIRECT) {
 		ino->block_ptrs[numBlocks] = reserve_data_block();
 		ino->blocks++;
@@ -947,14 +947,14 @@ static void ext_reserve_data_block(struct refs_inode *ino) {
 	int indirectOffset = (numBlocks - NUM_DIRECT) / (BLOCK_SIZE / sizeof(lba_t));
 	int blockNum = (numBlocks - NUM_DIRECT) % (BLOCK_SIZE / sizeof(lba_t));
 	assert(indirectOffset < NUM_INDIRECT);
-	
+
 	if (blockNum == 0) {
 		ino->block_ptrs[NUM_DIRECT + indirectOffset] = reserve_data_block();
 	}
-	
+
 	lba_t *lbas = (lba_t*) *(ino->block_ptrs + NUM_DIRECT + indirectOffset);
 	lbas[blockNum] = reserve_data_block();
-	
+
 	ino->blocks++;
 
 }
@@ -984,18 +984,18 @@ static int refs_truncate(const char *path, off_t size) {
 	}
 
 	ino = (struct refs_inode *) &(inode_table[inum]).inode;
-	
+
 	if (ino->size == size) {
 		return 0;
 	}
-	
+
 	if (ino->size < size) {
 		int firstBlock = ino->size / BLOCK_SIZE;
 		int lastBlock = (size - 1) / BLOCK_SIZE;
 
 		int byteOffsetBegin = ino->size % BLOCK_SIZE;
 		int byteOffsetEnd = (size - 1) % BLOCK_SIZE + 1;
-		
+
 		if (byteOffsetBegin == 0) {
 			ext_release_data_block(ino);
 		}
@@ -1009,82 +1009,82 @@ static int refs_truncate(const char *path, off_t size) {
 
 			free(block);
 		} else {
-		
+
 			char *blockBegin = malloc(sizeof(char) * BLOCK_SIZE);
 			char *blockEnd = malloc(sizeof(char) * BLOCK_SIZE);
 
 			ext_read_blocks(blockBegin, 1, firstBlock, ino);
 			fill(blockBegin, byteOffsetBegin, BLOCK_SIZE - 1, 0);
 			ext_write_blocks(blockBegin, 1, firstBlock, ino);
-			
+
 			int numMiddleBlocks = lastBlock - firstBlock + 1;
 			for (int i = 0; i < numMiddleBlocks; i++) {
 				char *middleBlock = malloc(sizeof(char) * (BLOCK_SIZE));
-				
+
 				ext_reserve_data_block(ino);
-				
+
 				// ext_read_blocks(middleBlock, 1, firstBlock + i + 1, ino);
 				fill(middleBlock, 0, BLOCK_SIZE - 1, 0);
 				ext_write_blocks(middleBlock, 1, firstBlock + i + 1, ino);
-				
+
 				free(middleBlock);
 			}
-			
+
 			ext_reserve_data_block(ino);
-			
+
 			ext_read_blocks(blockEnd, 1, lastBlock, ino);
 			fill(blockEnd, 0, byteOffsetEnd - 1, 0);
 			ext_write_blocks(blockEnd, 1, lastBlock, ino);
-			
+
 			free(blockBegin);
 			free(blockEnd);
 		}
 	} else {
 		int firstBlock = size / BLOCK_SIZE;
 		int lastBlock = (ino->size - 1) / BLOCK_SIZE;
-		
+
 		int byteOffsetBegin = size % BLOCK_SIZE;
 		int byteOffsetEnd = (ino->size - 1) % BLOCK_SIZE + 1;
-		
+
 		if (byteOffsetBegin == 0) {
 			ext_release_data_block(ino);
 		}
-		
+
 		if (firstBlock == lastBlock) {
 			char *block = malloc(sizeof(char) * BLOCK_SIZE);
-			
+
 			ext_read_blocks(block, 1, firstBlock, ino);
 			fill(block, byteOffsetBegin, byteOffsetEnd - 1, 0);
 			ext_write_blocks(block, 1, firstBlock, ino);
-			
+
 			free(block);
 		} else {
 			char *blockBegin = malloc(sizeof(char) * BLOCK_SIZE);
 			char *blockEnd = malloc(sizeof(char) * BLOCK_SIZE);
-			
+
 			ext_read_blocks(blockBegin, 1, firstBlock, ino);
 			fill(blockBegin, byteOffsetBegin, BLOCK_SIZE - 1, 0);
 			ext_write_blocks(blockBegin, 1, firstBlock, ino);
-			
+
 			int numMiddleBlocks = lastBlock - firstBlock + 1;
 			for (int i = 0; i < numMiddleBlocks; i++) {
 				char *middleBlock = malloc(sizeof(char) * (BLOCK_SIZE));
-				
+
 				ext_release_data_block(ino);
-				
+
 				// ext_read_blocks(middleBlock, 1, firstBlock + i + 1, ino);
 				fill(middleBlock, 0, BLOCK_SIZE - 1, 0);
 				ext_write_blocks(middleBlock, 1, firstBlock + i + 1, ino);
-				
+
 				free(middleBlock);
 			}
-			
+
 			ext_release_data_block(ino);
-			
+
 			ext_read_blocks(blockEnd, 1, lastBlock, ino);
 			fill(blockEnd, 0, byteOffsetEnd - 1, 0);
 			ext_write_blocks(blockEnd, 1, lastBlock, ino);
-			
+
 			free(blockBegin);
 			free(blockEnd);
 		}
@@ -1118,17 +1118,17 @@ static int refs_write(const char *path, const char *buf, size_t size,
 	}
 
 	ino = (struct refs_inode *) &(inode_table[inum]).inode;
-	
+
 	if (size + offset >= ino->size) {
 		refs_truncate(path, size + offset);
 	}
-	
+
 	int firstBlock = offset / BLOCK_SIZE;
 	int lastBlock = (ino->size - 1) / BLOCK_SIZE;
 
 	int byteOffsetBegin = offset % BLOCK_SIZE;
 	int byteOffsetEnd = (ino->size - 1) % BLOCK_SIZE + 1;
-	
+
 	if (firstBlock == lastBlock) {
 		char *block = malloc(sizeof(char) * BLOCK_SIZE);
 
@@ -1139,32 +1139,32 @@ static int refs_write(const char *path, const char *buf, size_t size,
 		free(block);
 	} else {
 		int currentBufOffset = 0;
-		
+
 		char *blockBegin = malloc(sizeof(char) * BLOCK_SIZE);
 		char *blockEnd = malloc(sizeof(char) * BLOCK_SIZE);
 
 		ext_read_blocks(blockBegin, 1, firstBlock, ino);
 		strncpy(blockBegin + byteOffsetBegin, buf, BLOCK_SIZE - byteOffsetBegin);
 		ext_write_blocks(blockBegin, 1, firstBlock, ino);
-		
+
 		currentBufOffset = BLOCK_SIZE - byteOffsetBegin;
-		
+
 		int numMiddleBlocks = lastBlock - firstBlock + 1;
 		for (int i = 0; i < numMiddleBlocks; i++) {
 			char *middleBlock = malloc(sizeof(char) * (BLOCK_SIZE));
-			
+
 			strncpy(middleBlock, buf + currentBufOffset, BLOCK_SIZE);
 			ext_write_blocks(middleBlock, 1, firstBlock + i + 1, ino);
-			
+
 			free(middleBlock);
 			currentBufOffset += BLOCK_SIZE;
 		}
-		
-		
+
+
 		ext_read_blocks(blockEnd, 1, lastBlock, ino);
 		strncpy(blockEnd, buf + currentBufOffset, byteOffsetEnd);
 		ext_write_blocks(blockEnd, 1, lastBlock, ino);
-		
+
 		free(blockBegin);
 		free(blockEnd);
 	}
@@ -1252,6 +1252,10 @@ static int remove_child(struct refs_inode *parent, struct refs_inode * child, ch
 			}
 		}
 	}
+
+	free(dup);
+	free(current);
+	return -ENOENT;
 }
 
 static int do_rmdir(char * path, int parentInum, int childInum){
@@ -1280,6 +1284,10 @@ static int do_rmdir(char * path, int parentInum, int childInum){
 	childInode->n_links = 0;
 
 	release_inode(childInode);
+	sync_data_bitmap();
+	sync_inode_bitmap();
+	write_inode(childInum);
+
 	return 0;
 }
 
@@ -1411,6 +1419,93 @@ static int refs_release(const char* path, struct fuse_file_info *fi) {
 	return 0;
 }
 
+static int do_unlink(char * path, int parentInum, int childInum){
+	struct refs_inode * parentInode = &inode_table[parentInum].inode;
+	struct refs_inode * childInode = &inode_table[childInum].inode;
+
+	// Removing the child from the parent directory
+	int ret = remove_child(parentInode, childInode, path);
+
+	if(ret){
+		return ret;
+	}
+
+	if(childInode->n_links == 0){
+		clear_bit(inode_bitmap, childInum);
+
+		int numIndirect = (childInode->blocks - NUM_DIRECT)/NUM_INDIRECT_POINTERS;
+
+		lba_t * blk = malloc_blocks(1);
+
+		for(int i = 0; i < childInode->blocks; i++){
+				if(i < NUM_DIRECT){
+					clear_bit(data_bitmap, childInode->block_ptrs[i] - super.super.d_region_start);
+				} else {
+					int index = (i - NUM_DIRECT) % NUM_INDIRECT_POINTERS;
+					read_block(blk,childInode->block_ptrs[NUM_DIRECT+index]);
+
+					int min = childInode->blocks - i;
+					if(NUM_INDIRECT_POINTERS < min){
+						min = NUM_INDIRECT_POINTERS;
+					}
+
+					int offset = 0;
+					while(offset < min){
+						lba_t temp = (lba_t) (blk + offset);
+						clear_bit(data_bitmap, temp - super.super.d_region_start);
+					}
+
+				}
+		}
+
+		free(blk);
+
+		for(int i = 0; i < numIndirect; i++){
+			clear_bit(data_bitmap, childInode->block_ptrs[i+NUM_DIRECT] - super.super.d_region_start);
+		}
+
+		release_inode(childInode);
+		sync_data_bitmap();
+		sync_inode_bitmap();
+		write_inode(childInum);
+	}
+	return 0;
+}
+
+static int refs_unlink(const char * path){
+	int ret = 0;
+	int parentInum = 0;
+	int childInum = 0;
+
+	// Checking to make sure filesystem can reach the parent directory.
+	ret = get_parent_inum((char *) path, &parentInum);
+	if(ret != 0){
+		return ret;
+	}
+
+
+
+	// Checking to make sure target file exists.
+	struct refs_inode * parentInode = &inode_table[parentInum].inode;
+	childInum = find_child_inum_abspath((char *) path, parentInode);
+	if(childInum == -1){
+		return -ENOENT;
+	}
+
+	// Checking to make sure path refers to a file.
+	struct refs_inode *dir_inode = &inode_table[childInum].inode;
+	if (!(dir_inode->flags & INODE_TYPE_REG)) {
+		return -ENOTDIR;
+	}
+
+
+	return do_unlink((char *) path, parentInum, childInum);
+}
+
+static int refs_fgetattr(const char * path, struct stat* stbuf, struct fuse_file_info *fi){
+	return refs_getattr(path, stbuf);
+}
+
 
 // You should implement the functions that you need, but do so in a
 // way that lets you incrementally test.
@@ -1421,32 +1516,25 @@ static struct fuse_operations refs_operations = {
 	.access = refs_access,
 	.mkdir = refs_mkdir,
 	.readdir	= refs_readdir,
-	.truncate	= refs_truncate
+	.truncate	= refs_truncate,
 	.mknod = refs_mknod,
 	.create = refs_create,
 	.release = refs_release,
 	.open = refs_open,
 	.rmdir = refs_rmdir,
 	.write		= refs_write,
-/*
-	.fgetattr	= NULL,
-	.access		= NULL,
+	.unlink = refs_unlink,
+	.fgetattr	= refs_fgetattr
+	/*
 	.readlink	= NULL,
-	.mknod		= NULL,
-	.create		= NULL,
-	.mkdir		= NULL,
 	.symlink	= NULL,
-	.unlink		= NULL,
-	.rmdir		= NULL,
 	.rename		= NULL,
 	.link		= NULL,
 	.chmod		= NULL,
 	.chown		= NULL,
 	.utimens	= NULL,
-	.open		= NULL,
 	.read		= NULL,
 	.statfs		= NULL,
-	.release	= NULL,
 	.fsync		= NULL,
 #ifdef HAVE_SETXATTR
 	.setxattr	= NULL,

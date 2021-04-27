@@ -30,6 +30,7 @@ typedef uint64_t lba_t;
 #define BLOCK_ROUND_UP(n) ((((n) + (BLOCK_SIZE-1)) / BLOCK_SIZE) * BLOCK_SIZE)
 #define NUM_DIRECT 10   // feel free to change
 #define NUM_INDIRECT 2  // feel free to change
+#define NUM_INDIRECT_POINTERS BLOCK_SIZE / sizeof(lba_t)
 
 #define BYTES_TO_BLKS(x) ((x) >> (BLOCK_SHIFT))
 #define BLKS_TO_BYTES(x) ((x) << (BLOCK_SHIFT))
