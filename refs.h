@@ -30,7 +30,8 @@ typedef uint64_t lba_t;
 #define BLOCK_ROUND_UP(n) ((((n) + (BLOCK_SIZE-1)) / BLOCK_SIZE) * BLOCK_SIZE)
 #define NUM_DIRECT 10   // feel free to change
 #define NUM_INDIRECT 2  // feel free to change
-#define NUM_INDIRECT_POINTERS BLOCK_SIZE / sizeof(lba_t)
+#define NUM_INDIRECT_POINTERS (BLOCK_SIZE / sizeof(lba_t))
+#define MAX_FILE_BLOCKS (NUM_DIRECT + (NUM_INDIRECT*NUM_INDIRECT_POINTERS))
 
 #define BYTES_TO_BLKS(x) ((x) >> (BLOCK_SHIFT))
 #define BLKS_TO_BYTES(x) ((x) << (BLOCK_SHIFT))
@@ -68,6 +69,8 @@ union superblock {
 struct refs_inode {
 	char flags;
   uint16_t mode;
+  uid_t uid;
+  uid_t gid;
 	uint16_t n_links;
 	uint64_t inum;
 	uint64_t size;

@@ -219,6 +219,11 @@ static int reserve_inode() {
 	inode_table[inum].inode.n_links = 0;
 	inode_table[inum].inode.size = 0;
 	inode_table[inum].inode.blocks = 0;
+
+	struct fuse_context * ctx = fuse_get_context();
+
+	inode_table[inum].inode.uid = ctx->uid;
+	inode_table[inum].inode.gid = ctx->gid;
 	return inum;
 }
 
@@ -277,7 +282,7 @@ static int alloc_root_dir() {
 	inode_table[inum].inode.size = 4096;
 	inode_table[inum].inode.blocks = 1;
 	inode_table[inum].inode.block_ptrs[0] = data_lba;
-	inode_table[inum].inode.mode = 0775;
+	inode_table[inum].inode.mode = 0777;
 
 	// write the directory contents to its data block
 	write_block(root_data, data_lba);
@@ -631,10 +636,11 @@ static int refs_getattr(const char * path, struct stat* stbuf){
 */
 static int refs_access(const char *path, int mask){
 
-	struct stat perm;
+	int ret;
 
-	// Checking to make sure we can access the path.
-	int ret = refs_getattr(path, &perm);
+	int inum;
+
+	ret = get_path_inum((char *) path, &inum);
 
 	// Returning possible errors.
 	if(ret){
@@ -646,12 +652,46 @@ static int refs_access(const char *path, int mask){
 		return 0;
 	}
 
-	// Checking to make sure file/directory has the desired mode.
-	if ((mask & (perm.st_mode >> 6)) == mask){
-		return 0;
+	struct fuse_context *ctx = fuse_get_context();
+
+	int allowed_mode = 0;
+
+	// user matches
+	if (ctx->uid == inode_table[inum].inode.uid) {
+		allowed_mode |= inode_table[inum].inode.mode & S_IRUSR ?
+			R_OK : 0;
+		allowed_mode |= inode_table[inum].inode.mode & S_IWUSR ?
+			W_OK : 0;
+		allowed_mode |= inode_table[inum].inode.mode & S_IXUSR ?
+			X_OK : 0;
 	}
 
-	return -1;
+	// group matches
+	if (ctx->gid == inode_table[inum].inode.gid) {
+		allowed_mode |= inode_table[inum].inode.mode & S_IRGRP ?
+			R_OK : 0;
+		allowed_mode |= inode_table[inum].inode.mode & S_IWGRP ?
+			W_OK : 0;
+		allowed_mode |= inode_table[inum].inode.mode & S_IXGRP ?
+			X_OK : 0;
+	}
+
+	// always check "other"
+	allowed_mode |= inode_table[inum].inode.mode & S_IROTH ? R_OK : 0;
+	allowed_mode |= inode_table[inum].inode.mode & S_IWOTH ? W_OK : 0;
+	allowed_mode |= inode_table[inum].inode.mode & S_IXOTH ? X_OK : 0;
+
+
+	// confirm that if they ask for each permission, they are allowed to perform
+	// said permission.
+	if ((mask & R_OK) && !(allowed_mode & R_OK))
+		    return -EACCES;
+	if ((mask & W_OK) && !(allowed_mode & W_OK))
+		    return -EACCES;
+	if ((mask & X_OK) && !(allowed_mode & X_OK))
+		    return -EACCES;
+
+	return 0;
 }
 
 /*
@@ -708,7 +748,7 @@ static int update_parent_inode(int childInum, int parentInum, char * childPath){
 	// for the parent inode.
 	parent->n_links -= 1;
 	write_inode(parentInum);
-	return -1;
+	return -ENOSPC;
 }
 
 /*
@@ -867,102 +907,145 @@ static int refs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 	return 0;
 }
 
+/*
+// This function fills in a string starting at offset being, and ending at
+// end-1 with the character stored in thing.
+*/
 static void fill(char *str, int begin, int end, char thing) {
-	for (int i = begin; i <= end; i++) {
+	for (int i = begin; i < end; i++) {
 		str[i] = thing;
 	}
 }
 
-static int min(int a, int b) {
-	if (a < b) {
-		return a;
-	}
-	return b;
-}
+/*
+// This function removes the last block within a file by unsetting
+// the bit for that data block.
+*/
+void file_remove_data_block(struct refs_inode * fileInode){
 
-static void ext_read_blocks(char *buf, int numBlocks, off_t start, struct refs_inode *ino) {
-	if (start < NUM_DIRECT) {
-		int endDirect = min(start + numBlocks - 1, NUM_DIRECT - 1);
-		read_blocks(buf, endDirect - start + 1, ino->block_ptrs[start]);
-		int numReadDirect = NUM_DIRECT - start + 1;
+	// Next block to be removed.
+	int next = fileInode->blocks - 1;
 
-		// offsetting start, numBlocks, and buf to make code easier
-		numBlocks -= numReadDirect;
-		start = NUM_DIRECT;
-		buf += numReadDirect * BLOCK_SIZE;
-	}
-	if (numBlocks > 0) {
-		int startIndirect = start - NUM_DIRECT;
-		for (int i = startIndirect; i < startIndirect + numBlocks; i++) {
-			int indirectBlock = i / BLOCKS_PER_BLOCK;
-			int offsetIndirect = i % BLOCKS_PER_BLOCK;
+	// Case where we are removing a direct block.
+	if(next<NUM_DIRECT){
+		clear_bit(data_bitmap, fileInode->block_ptrs[next] - super.super.d_region_start);
+	} else{
+		// Case where we are removing a block in an indirect block.
+		int index = ((next - NUM_DIRECT) / NUM_INDIRECT_POINTERS) + NUM_DIRECT;
+		int offset = (next - NUM_DIRECT) % NUM_INDIRECT_POINTERS;
 
-			lba_t *lbas = (lba_t*) *(ino->block_ptrs + NUM_DIRECT + indirectBlock);
-			read_blocks(buf, 1, lbas[offsetIndirect]);
+		char * blk[BLOCK_SIZE];
 
-			buf += BLOCK_SIZE;
+		// Reading in the indirect block.
+		read_block(blk, fileInode->block_ptrs[index]);
+
+		// Removing the block within the indirect block.
+		lba_t data_lba = ((lba_t *)blk)[offset];
+		clear_bit(data_bitmap, data_lba - super.super.d_region_start);
+
+		// Case where an indirect block now contains zero block pointers. As such,
+		// we also remove this indirect block.
+		if(offset == 0){
+			clear_bit(data_bitmap, fileInode->block_ptrs[index] - super.super.d_region_start);
 		}
 	}
+
+	// Updating the number of blocks in the inode.
+	fileInode->blocks -=1;
+	write_inode(fileInode->inum);
+	return;
 }
 
-static void ext_write_blocks(char *buf, int numBlocks, off_t start, struct refs_inode *ino) {
-	if (start < NUM_DIRECT) {
-		int endDirect = min(start + numBlocks - 1, NUM_DIRECT - 1);
-		write_blocks(buf, endDirect - start + 1, ino->block_ptrs[start]);
-		int numWriteDirect = NUM_DIRECT - start + 1;
+/*
+// Reserves an empty new block for a file.
+*/
+void file_reserve_data_block(struct refs_inode * fileInode){
+	lba_t data_lba = reserve_data_block();
 
-		// offsetting start, numBlocks, and buf to make code easier
-		numBlocks -= numWriteDirect;
-		start = NUM_DIRECT;
-		buf += numWriteDirect * BLOCK_SIZE;
-	}
-	if (numBlocks > 0) {
-		int startIndirect = start - NUM_DIRECT;
-		for (int i = startIndirect; i < startIndirect + numBlocks; i++) {
-			int indirectBlock = i / BLOCKS_PER_BLOCK;
-			int offsetIndirect = i % BLOCKS_PER_BLOCK;
+	// Next block to be allocated.
+	int next = fileInode->blocks;
 
-			lba_t *lbas = (lba_t*) *(ino->block_ptrs + NUM_DIRECT + indirectBlock);
-			write_blocks(buf, 1, lbas[offsetIndirect]);
+	char blk[BLOCK_SIZE];
+	bzero(blk, BLOCK_SIZE);
 
-			buf += BLOCK_SIZE;
+	write_block(blk, data_lba);
+
+	// Case where we are reserving a direct block.
+	if(next < NUM_DIRECT){
+		fileInode->block_ptrs[next] = data_lba;
+	} else{
+		// Case where we are reserving a block in an indirect block.
+		int index = ((next - NUM_DIRECT) / NUM_INDIRECT_POINTERS) + NUM_DIRECT;
+		int offset = (next - NUM_DIRECT) % NUM_INDIRECT_POINTERS;
+
+		// Case where we need to add a new indirect block to store more blocks.
+		if(offset == 0){
+			lba_t data_lba_indirect = reserve_data_block();
+			fileInode->block_ptrs[index] = data_lba_indirect;
 		}
-	}
-}
 
-static void ext_reserve_data_block(struct refs_inode *ino) {
-
-	int numBlocks = ino->blocks;
-
-	if (numBlocks < NUM_DIRECT) {
-		ino->block_ptrs[numBlocks] = reserve_data_block();
-		ino->blocks++;
-		return;
+		// Storing the new block within the indirect block.
+		read_block(blk, fileInode->block_ptrs[index]);
+		((lba_t *) blk)[offset] = data_lba;
+		write_block(blk, fileInode->block_ptrs[index]);
 	}
 
-	int indirectOffset = (numBlocks - NUM_DIRECT) / (BLOCK_SIZE / sizeof(lba_t));
-	int blockNum = (numBlocks - NUM_DIRECT) % (BLOCK_SIZE / sizeof(lba_t));
-	assert(indirectOffset < NUM_INDIRECT);
+	// Updating the number of blocks in the inode.
+	fileInode->blocks += 1;
+	write_inode(fileInode->inum);
+	return;
+}
 
-	if (blockNum == 0) {
-		ino->block_ptrs[NUM_DIRECT + indirectOffset] = reserve_data_block();
+/*
+// Function to read a specific block from a file.
+*/
+void file_read_block(char * blk, struct refs_inode* fileInode, int blockNum){
+	// Case where we are reading a direct block.
+	if(blockNum < NUM_DIRECT){
+		read_block(blk, fileInode->block_ptrs[blockNum]);
+	} else {
+		// Case where we are reading from an indirect block.
+		int index = ((blockNum - NUM_DIRECT) / NUM_INDIRECT_POINTERS) + NUM_DIRECT;
+		int offset = (blockNum - NUM_DIRECT) % NUM_INDIRECT_POINTERS;
+
+		char blk2[BLOCK_SIZE];
+
+		read_block(blk2, fileInode->block_ptrs[index]);
+
+		read_block(blk, ((lba_t *) blk2)[offset]);
 	}
-
-	lba_t *lbas = (lba_t*) *(ino->block_ptrs + NUM_DIRECT + indirectOffset);
-	lbas[blockNum] = reserve_data_block();
-
-	ino->blocks++;
-
+	return;
 }
 
-static void ext_release_data_block(struct refs_inode *ino) {
-	// TODO: release data block at location blockOffset including indirect blocks
+/*
+// Function to write to a specific block within a file.
+*/
+void file_write_block(char * blk, struct refs_inode* fileInode, int blockNum){
+	// Case where we are writing to a direct block.
+	if(blockNum < NUM_DIRECT){
+		write_block(blk, fileInode->block_ptrs[blockNum]);
+	} else {
+		// Case where we are writing to a block in an indirect block.
+		int index = ((blockNum - NUM_DIRECT) / NUM_INDIRECT_POINTERS) + NUM_DIRECT;
+		int offset = (blockNum - NUM_DIRECT) % NUM_INDIRECT_POINTERS;
+
+		char blk2[BLOCK_SIZE];
+
+		read_block(blk2, fileInode->block_ptrs[index]);
+
+		write_block(blk, ((lba_t *) blk2)[offset]);
+	}
+	return;
 }
 
+/*
+// This function truncates a file specified by path to
+// be the inputted size. Returns 0 on success. Otherwise returns the
+// appropriate error code.
+*/
 static int refs_truncate(const char *path, off_t size) {
 
 	struct refs_inode *ino;
-
 	int ret = 0;
 	int inum = 0;
 
@@ -975,122 +1058,87 @@ static int refs_truncate(const char *path, off_t size) {
 	ret = get_path_inum((char *) path, &inum);
 
 	// Case where inodes doesn't exist for the parent path.
-	if (ret == -1) {
+	if (ret) {
 		return ret;
 	}
 
 	ino = (struct refs_inode *) &(inode_table[inum]).inode;
 
+	// Case where path doesn't refer to a file.
+	if(!(ino->flags & INODE_TYPE_REG)){
+		return -EINVAL;
+	}
+
+	// Case where no truncation is required.
 	if (ino->size == size) {
 		return 0;
 	}
 
+	char blk[BLOCK_SIZE];
+
+	int firstBlock;
+	int lastBlock;
+	int byteOffsetBegin;
+
+	// Case where we are growing the file.
 	if (ino->size < size) {
-		int firstBlock = ino->size / BLOCK_SIZE;
-		int lastBlock = (size - 1) / BLOCK_SIZE;
+		firstBlock = ino->size / BLOCK_SIZE;
+		lastBlock = size / BLOCK_SIZE;
 
-		int byteOffsetBegin = ino->size % BLOCK_SIZE;
-		int byteOffsetEnd = (size - 1) % BLOCK_SIZE + 1;
-
-		if (byteOffsetBegin == 0) {
-			ext_release_data_block(ino);
+		// Checking to see if we are trying to make the file too large.
+		if(lastBlock >= MAX_FILE_BLOCKS){
+			return -EFBIG;
 		}
 
-		if (firstBlock == lastBlock) {
-			char *block = malloc(sizeof(char) * BLOCK_SIZE);
-
-			ext_read_blocks(block, 1, firstBlock, ino);
-			fill(block, byteOffsetBegin, byteOffsetEnd - 1, 0);
-			ext_write_blocks(block, 1, firstBlock, ino);
-
-			free(block);
-		} else {
-
-			char *blockBegin = malloc(sizeof(char) * BLOCK_SIZE);
-			char *blockEnd = malloc(sizeof(char) * BLOCK_SIZE);
-
-			ext_read_blocks(blockBegin, 1, firstBlock, ino);
-			fill(blockBegin, byteOffsetBegin, BLOCK_SIZE - 1, 0);
-			ext_write_blocks(blockBegin, 1, firstBlock, ino);
-
-			int numMiddleBlocks = lastBlock - firstBlock + 1;
-			for (int i = 0; i < numMiddleBlocks; i++) {
-				char *middleBlock = malloc(sizeof(char) * (BLOCK_SIZE));
-
-				ext_reserve_data_block(ino);
-
-				// ext_read_blocks(middleBlock, 1, firstBlock + i + 1, ino);
-				fill(middleBlock, 0, BLOCK_SIZE - 1, 0);
-				ext_write_blocks(middleBlock, 1, firstBlock + i + 1, ino);
-
-				free(middleBlock);
-			}
-
-			ext_reserve_data_block(ino);
-
-			ext_read_blocks(blockEnd, 1, lastBlock, ino);
-			fill(blockEnd, 0, byteOffsetEnd - 1, 0);
-			ext_write_blocks(blockEnd, 1, lastBlock, ino);
-
-			free(blockBegin);
-			free(blockEnd);
-		}
-	} else {
-		int firstBlock = size / BLOCK_SIZE;
-		int lastBlock = (ino->size - 1) / BLOCK_SIZE;
-
-		int byteOffsetBegin = size % BLOCK_SIZE;
-		int byteOffsetEnd = (ino->size - 1) % BLOCK_SIZE + 1;
-
-		if (byteOffsetBegin == 0) {
-			ext_release_data_block(ino);
+		// Checking to see if our file is empty or not. If it is, we reserve it
+		// a data block.
+		if(ino->size ==0){
+			file_reserve_data_block(ino);
 		}
 
-		if (firstBlock == lastBlock) {
-			char *block = malloc(sizeof(char) * BLOCK_SIZE);
+		byteOffsetBegin = ino->size % BLOCK_SIZE;
 
-			ext_read_blocks(block, 1, firstBlock, ino);
-			fill(block, byteOffsetBegin, byteOffsetEnd - 1, 0);
-			ext_write_blocks(block, 1, firstBlock, ino);
+		// Extending the size of the file.
+		file_read_block(blk, ino, firstBlock);
+		fill(blk, byteOffsetBegin + 1, BLOCK_SIZE, '0');
+		file_write_block(blk, ino, firstBlock);
 
-			free(block);
-		} else {
-			char *blockBegin = malloc(sizeof(char) * BLOCK_SIZE);
-			char *blockEnd = malloc(sizeof(char) * BLOCK_SIZE);
+		for(int i = firstBlock+1; i <= lastBlock; i++){
+			file_reserve_data_block(ino);
+		}
+	} else{
+		// Case where we are shrinking the file.
 
-			ext_read_blocks(blockBegin, 1, firstBlock, ino);
-			fill(blockBegin, byteOffsetBegin, BLOCK_SIZE - 1, 0);
-			ext_write_blocks(blockBegin, 1, firstBlock, ino);
+		firstBlock = size / BLOCK_SIZE;
+		lastBlock = ino->size / BLOCK_SIZE;
 
-			int numMiddleBlocks = lastBlock - firstBlock + 1;
-			for (int i = 0; i < numMiddleBlocks; i++) {
-				char *middleBlock = malloc(sizeof(char) * (BLOCK_SIZE));
+		byteOffsetBegin = size % BLOCK_SIZE;
 
-				ext_release_data_block(ino);
+		// Zeroing out entries removed within the block that will be
+		// the new last block of the file after truncation.
+		file_read_block(blk, ino, firstBlock);
+		fill(blk, byteOffsetBegin + 1, BLOCK_SIZE, '0');
+		file_write_block(blk, ino, firstBlock);
 
-				// ext_read_blocks(middleBlock, 1, firstBlock + i + 1, ino);
-				fill(middleBlock, 0, BLOCK_SIZE - 1, 0);
-				ext_write_blocks(middleBlock, 1, firstBlock + i + 1, ino);
-
-				free(middleBlock);
-			}
-
-			ext_release_data_block(ino);
-
-			ext_read_blocks(blockEnd, 1, lastBlock, ino);
-			fill(blockEnd, 0, byteOffsetEnd - 1, 0);
-			ext_write_blocks(blockEnd, 1, lastBlock, ino);
-
-			free(blockBegin);
-			free(blockEnd);
+		// Removing each of the blocks that are being completely removed.
+		for(int i = firstBlock+1; i <= lastBlock; i++){
+			file_remove_data_block(ino);
 		}
 	}
 
+	// Updating the size stored by the inode.
 	ino->size = size;
+	write_inode(inum);
+
 	return 0;
 }
 
 
+/*
+// This function writes to a file specified by path. This function writes
+// a specified string of an inputted size at an offset within the file.
+// Returns 0 on succes. Otherwise returns the appropriate error code.
+*/
 static int refs_write(const char *path, const char *buf, size_t size,
 		     off_t offset, struct fuse_file_info *fi)
 {
@@ -1115,56 +1163,57 @@ static int refs_write(const char *path, const char *buf, size_t size,
 
 	ino = (struct refs_inode *) &(inode_table[inum]).inode;
 
-	if (size + offset >= ino->size) {
-		refs_truncate(path, size + offset);
+	// Case where path doesn't refer to a file.
+	if(!(ino->flags & INODE_TYPE_REG)){
+		return -EINVAL;
+	}
+
+	// Case where we are increasing the size of the file.
+	if (size + offset > ino->size) {
+		ret = refs_truncate(path, size + offset);
+	}
+
+	// Case where truncate failed.
+	if(ret){
+		return ret;
 	}
 
 	int firstBlock = offset / BLOCK_SIZE;
-	int lastBlock = (ino->size - 1) / BLOCK_SIZE;
+	int lastBlock = (size + offset) / BLOCK_SIZE;
 
 	int byteOffsetBegin = offset % BLOCK_SIZE;
-	int byteOffsetEnd = (ino->size - 1) % BLOCK_SIZE + 1;
 
-	if (firstBlock == lastBlock) {
-		char *block = malloc(sizeof(char) * BLOCK_SIZE);
+	char blk[BLOCK_SIZE];
 
-		ext_read_blocks(block, 1, firstBlock, ino);
-		strncpy(block + byteOffsetBegin, buf, byteOffsetEnd - byteOffsetBegin);
-		ext_write_blocks(block, 1, firstBlock, ino);
-
-		free(block);
+	// Case where the write starts and ends in the same file.
+	if(firstBlock == lastBlock){
+		file_read_block(blk, ino, firstBlock);
+		memcpy(blk+byteOffsetBegin, buf, size);
+		file_write_block(blk, ino, firstBlock);
 	} else {
-		int currentBufOffset = 0;
+		// Case where the write starts and ends in different files.
 
-		char *blockBegin = malloc(sizeof(char) * BLOCK_SIZE);
-		char *blockEnd = malloc(sizeof(char) * BLOCK_SIZE);
+		// Writing to the first block being changed.
+		file_read_block(blk, ino, firstBlock);
+		memcpy(blk + byteOffsetBegin, buf, BLOCK_SIZE-byteOffsetBegin);
+		file_write_block(blk, ino, firstBlock);
 
-		ext_read_blocks(blockBegin, 1, firstBlock, ino);
-		strncpy(blockBegin + byteOffsetBegin, buf, BLOCK_SIZE - byteOffsetBegin);
-		ext_write_blocks(blockBegin, 1, firstBlock, ino);
+		int written = BLOCK_SIZE-byteOffsetBegin;
 
-		currentBufOffset = BLOCK_SIZE - byteOffsetBegin;
-
-		int numMiddleBlocks = lastBlock - firstBlock + 1;
-		for (int i = 0; i < numMiddleBlocks; i++) {
-			char *middleBlock = malloc(sizeof(char) * (BLOCK_SIZE));
-
-			strncpy(middleBlock, buf + currentBufOffset, BLOCK_SIZE);
-			ext_write_blocks(middleBlock, 1, firstBlock + i + 1, ino);
-
-			free(middleBlock);
-			currentBufOffset += BLOCK_SIZE;
+		// Writing to each of the middle blocks being changed.
+		for (int i = firstBlock+1; i < lastBlock; i++) {
+			memcpy(blk, buf + written, BLOCK_SIZE);
+			file_write_block(blk, ino, i);
+			written += BLOCK_SIZE;
 		}
 
-
-		ext_read_blocks(blockEnd, 1, lastBlock, ino);
-		strncpy(blockEnd, buf + currentBufOffset, byteOffsetEnd);
-		ext_write_blocks(blockEnd, 1, lastBlock, ino);
-
-		free(blockBegin);
-		free(blockEnd);
+		// Writing to the last block being changed.
+		file_read_block(blk, ino, lastBlock);
+		memcpy(blk, buf + written, size-written);
+		file_write_block(blk, ino, lastBlock);
 	}
-	return 0;
+
+	return size;
 }
 
 /*
@@ -1450,49 +1499,12 @@ static int do_unlink(char * path, int parentInum, int childInum){
 
 	// Checking to make sure the number of links for the file is now zero.
 	if(childInode->n_links == 0){
-		clear_bit(inode_bitmap, childInum);
-
-		// Computing the number of indirect blocks the file has.
-		int numIndirect;
-		if(childInode->blocks <= NUM_DIRECT){
-			numIndirect = 0;
-		} else {
-			 numIndirect = (childInode->blocks - NUM_DIRECT)/NUM_INDIRECT_POINTERS + 1;
-		}
-
-		lba_t * blk = malloc_blocks(1);
 
 		for(int i = 0; i < childInode->blocks; i++){
-				// Case where we are considering a direct block.
-				if(i < NUM_DIRECT){
-					clear_bit(data_bitmap, childInode->block_ptrs[i] - super.super.d_region_start);
-				} else {
-					// Case where we are considering an indirect block.
-					int index = (i - NUM_DIRECT) % NUM_INDIRECT_POINTERS;
-					read_block(blk,childInode->block_ptrs[NUM_DIRECT+index]);
-
-					// Finding the number of valid block pointers within the indirect block
-					int min = childInode->blocks - i;
-					if(NUM_INDIRECT_POINTERS < min){
-						min = NUM_INDIRECT_POINTERS;
-					}
-
-					// Clearing the bits for each of the blocks within the indirect block
-					int offset = 0;
-					while(offset < min){
-						lba_t temp = (lba_t) (blk + offset);
-						clear_bit(data_bitmap, temp - super.super.d_region_start);
-					}
-
-				}
+					file_remove_data_block(childInode);
 		}
 
-		free(blk);
-
-		// Clearing the bits for the indirect blocks.
-		for(int i = 0; i < numIndirect; i++){
-			clear_bit(data_bitmap, childInode->block_ptrs[i+NUM_DIRECT] - super.super.d_region_start);
-		}
+		clear_bit(inode_bitmap, childInum);
 
 		// Saving changes to the filesystem.
 		release_inode(childInode);
@@ -1543,13 +1555,61 @@ static int refs_fgetattr(const char * path, struct stat* stbuf, struct fuse_file
 	return refs_getattr(path, stbuf);
 }
 
-
+/*
+// Helper function to read from a file. Specifically, reads from the file
+// specified by an inputted inode number starting at an inputted offset, and for
+// an inputted size.
+// Returns zero on succes. Otherwise returns the appropriate error code.
+*/
 static int do_read(int childInum, char * buf, size_t size, off_t offset){
 		struct refs_inode *file_inode = &inode_table[childInum].inode;
 
+		// Case where we are reading starting from the outside of the file.
 		if(file_inode->size < offset){
 			return 0;
 		}
+
+		// Shortening the size to be read if the file is too short.
+		if(offset + size > file_inode->size){
+			size = file_inode->size - offset;
+		}
+
+		int firstBlock = offset / BLOCK_SIZE;
+		int lastBlock = (size + offset) / BLOCK_SIZE;
+
+		int byteOffsetBegin = offset % BLOCK_SIZE;
+
+		char blk[BLOCK_SIZE];
+
+		struct refs_inode * ino = &inode_table[childInum].inode;
+
+		// Case where we are only reading from one block.
+		if(firstBlock == lastBlock){
+			file_read_block(blk, ino, firstBlock);
+			memcpy(buf, blk + byteOffsetBegin, size);
+		} else {
+			// Case where we are reading from multiple blocks.
+
+			// Reading from the first block to be read.
+			file_read_block(blk, ino, firstBlock);
+			memcpy(buf, blk + byteOffsetBegin, BLOCK_SIZE-byteOffsetBegin);
+
+			int read = BLOCK_SIZE-byteOffsetBegin;
+
+			// Reading from each of the middle blocks.
+			for (int i = firstBlock+1; i < lastBlock; i++) {
+				file_read_block(blk, ino, i);
+				memcpy(buf + read, blk, BLOCK_SIZE);
+
+				read += BLOCK_SIZE;
+			}
+
+			// Reading from the last block to be read.
+			file_read_block(blk, ino, lastBlock);
+			memcpy(buf + read, blk, size-read);
+		}
+
+		return size;
 }
 
 /*
@@ -1584,13 +1644,38 @@ static int refs_read(const char * path, char * buf, size_t size, off_t offset,
 		}
 
 		// Checking to make sure we can read the file.
-		if(access(path, R_OK)){
+		if(refs_access(path, R_OK)){
 			return -EACCES;
 		}
 
 		return do_read(childInum, buf, size, offset);
 }
 
+/*
+// Function to change the permissions of a file or directory specified by
+// path to the permissions stored by mode. Returns 0 on success. Otherwise,
+// returns the appropriate error code.
+*/
+int static refs_chmod(const char * path, mode_t mode){
+	int ret =0;
+	int inum;
+
+	// Getting the inumber specified by the path.
+	ret = get_path_inum((char*)path, &inum);
+
+	// Checking for errors.
+	if(ret){
+		return ret;
+	}
+
+	struct refs_inode *inode = &inode_table[inum].inode;
+
+	// Updating the permissions of the inode.
+	inode->mode =mode;
+	write_inode(inum);
+
+	return 0;
+}
 
 // You should implement the functions that you need, but do so in a
 // way that lets you incrementally test.
@@ -1610,7 +1695,8 @@ static struct fuse_operations refs_operations = {
 	.write		= refs_write,
 	.unlink = refs_unlink,
 	.fgetattr	= refs_fgetattr,
-	.read = refs_read
+	.read = refs_read,
+	.chmod = refs_chmod
 	/*
 	.readlink	= NULL,
 	.symlink	= NULL,
