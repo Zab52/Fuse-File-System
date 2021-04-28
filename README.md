@@ -31,7 +31,7 @@ persistently even after unmounting and mounting.
 
 To unmount the file system, simply run 'fusermount -u mnt'.
 
-To run our testing code (which is still a work in progress):
+To run our testing code:
 
 First, delete the refs_disk folder.
 
@@ -42,3 +42,6 @@ Compile using 'gcc -o test-access test-access.c'.
 To run the testing code, run './test-access'.
 
 After testing, then just unmount the file system as described.
+
+(Note, our testing is incomplete since we ran out of time. Will potentially add
+  thorough testing code after due date)
