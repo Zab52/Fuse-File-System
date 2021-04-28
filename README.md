@@ -24,10 +24,9 @@ To compile our code, simply run the 'make' command in the terminal.
 To mount the file system, simply run '.\refs -s -d mnt', or '.\refs -s -f mnt'.
 (The code won't run without the -d, or -f flags).
 
-Once the file system is mounted, our file system currently supports four
+Once the file system is mounted, our file system currently supports twelve
 operations: getattr(), mkdir(), readdir(),
-and access(). As such, the file system will support any calls of mkdir, ls, cd,
-and stat. Additionally, any directories created using 'mkdir' will remain
+access(), truncate(), mknod(), create(), release(), open(), rmdir(), write(), unlink(), fgetattr(), chmod(), and read(). As such, the file system will support any calls of mkdir, ls, cd, stat, touch, cat, unlink, chmod, and rmdir. Additionally, any directories created using 'mkdir' will remain
 persistently even after unmounting and mounting.
 
 To unmount the file system, simply run 'fusermount -u mnt'.
