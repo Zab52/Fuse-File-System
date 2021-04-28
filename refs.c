@@ -479,56 +479,65 @@ static void refs_destroy(void *conn){
 // the path name of the child directory. This function then returns the
 // inode number to the child directory, or -1 if the child isn't found.
 */
-int find_child_inum(char * path, struct refs_inode* ino){
-	union directory_block * blk = malloc(sizeof(union directory_block));
+int find_child_inum(char * path, struct refs_inode* ino, int *childInum){
+	union directory_block blk;
 
 	// Iterating through each of the blocks connecting to the inode
 	for (int i = 0; i < ino->blocks; i++) {
-		read_block(blk, ino->block_ptrs[i]);
+		read_block(&blk, ino->block_ptrs[i]);
 
 		// Iterating through each of the directory entries in each block.
 		for (int j = 0; j < DIRENTS_PER_BLOCK; j++) {
-			struct dir_entry *dir = &blk->dirents[j];
+			struct dir_entry *dir = &blk.dirents[j];
 
 			// Checking to make sure the found directory is valid.
 			if (dir != NULL && dir->is_valid){
 
 				// Case where the found directory has the desired path name.
 				if (!strcmp(dir->path, path)) {
-					free(blk);
-					return dir->inum;
+					*childInum = dir->inum;
+					return 0;
 				}
 			}
 		}
 	}
-	free(blk);
-	return -1;
+	return -ENOENT;
 }
 
 /*
-//
-//
+// Find the child inumber for a path given the entire path, not just the
+// child path, and stores it at childInum. Returns zero on success. Otherwise
+// returns the oppropriate error code.
 */
-int find_child_inum_abspath(char * path, struct refs_inode * ino){
+int find_child_inum_abspath(char * path, struct refs_inode * ino, int *childInum){
 	char * dup = strdup(path);
+
+	if(dup ==  NULL){
+		return -ENOMEM;
+	}
 
 	char * base = basename(dup);
 
-	int ret = find_child_inum(base, ino);
+	int ret = find_child_inum(base, ino, childInum);
 
 	free(dup);
 
 	return ret;
 }
 
+/*
+// Gets the inode number for a path, and stores it in inum. Returns
+// 0 on success. Otherwise returns the appropriate error code.
+*/
 int get_path_inum(char * path, int * inum){
 
 	struct refs_inode * current;
 
+	char * dup = strdup(path);
+
 	// Tokenizing the path name.
   char delem[2] = "/";
-	char * temp = strtok(path + 1, delem);
-
+	char * temp = strtok(dup + 1, delem);
 
   * inum = 0;
 
@@ -542,10 +551,10 @@ int get_path_inum(char * path, int * inum){
 		}
 
 		// Finding the inode number of the next inode in the path.
-		*inum = find_child_inum(temp, current);
+		int ret = find_child_inum(temp, current, inum);
 
 		// Case where the inode isn't found.
-		if(*inum == -1){
+		if(ret){
 			return -ENOENT;
 		}
 
@@ -580,34 +589,20 @@ int get_parent_inum(char * path, int * inum){
 */
 static int refs_getattr(const char * path, struct stat* stbuf){
 
-	char * dup = malloc(sizeof(char) * strlen(path));
-
 	struct refs_inode* res;
 
 	int inum = 0;
 	int ret = 0;
 
-	// Checking to make sure the path isn't just the root path.
-	if(strcmp(path, "/")){
+	// Getting the inode number of the path.
+	ret = get_path_inum((char *) path, &inum);
 
-		strcpy(dup, path);
-
-		// Getting the parent inode number of the path.
-		ret = get_path_inum((char *) path, &inum);
-
-		free(dup);
-
-		// Case where inodes doesn't exist for the parent path.
-		if (ret != 0) {
-			return ret;
-		}
-
-		res = (struct refs_inode*) &(inode_table[inum]).inode;
-	} else{
-		// Case where path is just the root path. Thus, we just use the root inode.
-		res = (struct refs_inode *) &(inode_table[0]).inode;
+	if (ret != 0) {
+		return ret;
 	}
 
+	// Getting the desired inode.
+	res = (struct refs_inode*) &(inode_table[inum]).inode;
 
 	// Storing the inode information in the struct stat.
 	stbuf->st_nlink = res->n_links;
@@ -638,39 +633,52 @@ static int refs_access(const char *path, int mask){
 
 	struct stat perm;
 
-	refs_getattr(path, &perm);
+	// Checking to make sure we can access the path.
+	int ret = refs_getattr(path, &perm);
 
-	if(mask == F_OK && (mask & perm.st_mode)){
+	// Returning possible errors.
+	if(ret){
+		return ret;
+	}
+
+	// Returning true since we know file must already exist.
+	if (mask == F_OK){
 		return 0;
-	} else if ((mask & (perm.st_mode >> 6)) == mask){
+	}
+
+	// Checking to make sure file/directory has the desired mode.
+	if ((mask & (perm.st_mode >> 6)) == mask){
 		return 0;
 	}
 
 	return -1;
 }
 
+/*
+// Updates a parent directory inode to store a block pointer to a
+// child inode.
+*/
 static int update_parent_inode(int childInum, int parentInum, char * childPath){
 
 	struct refs_inode* parent = (struct refs_inode *) &(inode_table[parentInum]).inode;
 
-	union directory_block *blk = malloc(sizeof(union directory_block));
-	bzero(blk, BLOCK_SIZE);
+	union directory_block blk;
+	bzero(&blk, BLOCK_SIZE);
 
 	// Updating the number of links for the parent inode.
 	parent->n_links += 1;
 
 	// Looking for an open directory in the currently allocated blocks.
 	for(int j = 0; j < parent->blocks; j++){
-		read_block(blk, parent->block_ptrs[j]);
+		read_block(&blk, parent->block_ptrs[j]);
 		for(int n = 0; n < DIRENTS_PER_BLOCK; n++){
-			struct dir_entry *dir = blk->dirents + n;
+			struct dir_entry *dir = &blk.dirents[n];
 			if(!dir->is_valid){
 				dir->is_valid = 1;
 				dir->inum = childInum;
 				strcpy(dir->path, childPath);
 				dir->path_len = strlen(dir->path);
-				write_block(blk, parent->block_ptrs[j]);
-				free(blk);
+				write_block(&blk, parent->block_ptrs[j]);
 				write_inode(parentInum);
 				return 0;
 			}
@@ -683,17 +691,16 @@ static int update_parent_inode(int childInum, int parentInum, char * childPath){
 		parent->size += 4096;
 
 		lba_t data_lba = reserve_data_block();
-		bzero(blk, BLOCK_SIZE);
+		bzero(&blk, BLOCK_SIZE);
 
-		blk->dirents[0].inum = childInum;
-		blk->dirents[0].is_valid = 1;
-		strcpy(blk->dirents[0].path, childPath);
-		blk->dirents[0].path_len = strlen(blk->dirents[0].path);
+		blk.dirents[0].inum = childInum;
+		blk.dirents[0].is_valid = 1;
+		strcpy(blk.dirents[0].path, childPath);
+		blk.dirents[0].path_len = strlen(blk.dirents[0].path);
 
-		write_block(blk, data_lba);
+		write_block(&blk, data_lba);
 		sync_data_bitmap();
 		write_inode(parentInum);
-		free(blk);
 		return 0;
 	}
 
@@ -701,7 +708,6 @@ static int update_parent_inode(int childInum, int parentInum, char * childPath){
 	// for the parent inode.
 	parent->n_links -= 1;
 	write_inode(parentInum);
-	free(blk);
 	return -1;
 }
 
@@ -712,23 +718,24 @@ static int update_parent_inode(int childInum, int parentInum, char * childPath){
 */
 static int refs_mkdir(const char* path, mode_t mode){
 
-	char * dup = malloc(sizeof(char) * strlen(path));
-	strcpy(dup, path);
-
+	char * dup = strdup(path);
 	char * temp = dirname(dup);
-	int parentInum = 0;
-	int ret = 0;
 
 	// Case where parent directory doesn't have write mode.
 	if(refs_access(temp, W_OK)){
+		free(dup);
 		return -EACCES;
 	}
+
+	int parentInum = 0;
+	int ret = 0;
 
 	// Finding the parent inode number of the path,
 	ret = get_parent_inum((char *) path, &parentInum);
 
 	// Case where path is invalid.
 	if(ret != 0){
+		free(dup);
 		return ret;
 	}
 
@@ -741,31 +748,36 @@ static int refs_mkdir(const char* path, mode_t mode){
 
 	// Case where the filename of the new directory is too long.
 	if(strlen(childPath) > MAX_PATH_LEN){
+		free(dup);
 		return -ENAMETOOLONG;
 	}
 
+	int childInum = 0;
+	ret = find_child_inum(childPath, parent, &childInum);
+
 	// Checking to see if the directory file already exists.
-	if(find_child_inum(childPath, parent) != -1){
+	if(ret == 0){
+		free(dup);
 		return -EEXIST;
 	}
 
 	// Reserving space for the new directory.
-	int childInum = reserve_dir_inode();
+	childInum = reserve_dir_inode();
 	lba_t data_lba = reserve_data_block();
-	union directory_block *dir_data = malloc_blocks(1);
-	bzero(dir_data, BLOCK_SIZE);
+	union directory_block dir_data;
+	bzero(&dir_data, BLOCK_SIZE);
 
 	// init "." for the new directory.
-	dir_data->dirents[0].inum = childInum;
-	dir_data->dirents[0].is_valid = 1;
-	strcpy(dir_data->dirents[0].path, ".");
-	dir_data->dirents[0].path_len = strlen(dir_data->dirents[0].path);
+	dir_data.dirents[0].inum = childInum;
+	dir_data.dirents[0].is_valid = 1;
+	strcpy(dir_data.dirents[0].path, ".");
+	dir_data.dirents[0].path_len = strlen(dir_data.dirents[0].path);
 
 	// init ".." for the new directory.
-	dir_data->dirents[1].inum = parentInum;
-	dir_data->dirents[1].is_valid = 1;
-	strcpy(dir_data->dirents[1].path, "..");
-	dir_data->dirents[1].path_len = strlen(dir_data->dirents[1].path);
+	dir_data.dirents[1].inum = parentInum;
+	dir_data.dirents[1].is_valid = 1;
+	strcpy(dir_data.dirents[1].path, "..");
+	dir_data.dirents[1].path_len = strlen(dir_data.dirents[1].path);
 
 	// update the inode's direct pointer to point to itself.
 	inode_table[childInum].inode.size = 4096;
@@ -774,7 +786,7 @@ static int refs_mkdir(const char* path, mode_t mode){
 	inode_table[childInum].inode.mode = mode;
 
 	// Saving changes to the filesystem.
-	write_block(dir_data, data_lba);
+	write_block(&dir_data, data_lba);
 	sync_data_bitmap();
 	write_inode(childInum);
 	sync_inode_bitmap();
@@ -782,7 +794,6 @@ static int refs_mkdir(const char* path, mode_t mode){
 	ret = update_parent_inode(childInum, parentInum, childPath);
 
 	free(dup);
-	free(dir_data);
 
 	return ret;
 }
@@ -797,49 +808,35 @@ static int refs_mkdir(const char* path, mode_t mode){
 */
 static int refs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 			 off_t offset, struct fuse_file_info *fi) {
-
-	struct refs_inode* res;
 	int inum = 0;
 	int ret = 0;
 
-	// Case where the path isn't the root path.
-	if(strcmp(path, "/")){
+	// Finding the parent inode number of the path.
+	ret = get_path_inum((char *) path, &inum);
 
-		char * dup = malloc(sizeof(char) * strlen(path));
-
-		strcpy(dup, path);
-
-		// Finding the parent inode number of the path.
-		ret = get_path_inum((char *) path, &inum);
-
-		free(dup);
-
-		// Case where the path isn't valid.
-		if(ret != 0){
-			return ret;
-		}
-
-		res = (struct refs_inode *) &inode_table[inum].inode;
-	} else {
-		// Case where the path is the root path. Thus, we just use the root inode.
-		res = (struct refs_inode *) &inode_table[0].inode;
+	// Case where the path isn't valid.
+	if(ret != 0){
+		return ret;
 	}
+
+	// Getting the inode of the path.
+	struct refs_inode* res = (struct refs_inode *) &inode_table[inum].inode;
 
 	// Stores the number of found valid directories.
 	off_t num = 0;
 
 	int pathlen = strlen(path);
 
-	union directory_block *blk = malloc(sizeof(union directory_block));
-	bzero(blk, sizeof(union directory_block));
+	union directory_block blk;
+	bzero(&blk, sizeof(union directory_block));
 
 	// Proceeding through each block of the path inode.
 	for (int i = 0; i < res->blocks; i++) {
-		read_block(blk, res->block_ptrs[i]);
+		read_block(&blk, res->block_ptrs[i]);
 
 		// Considering each possible entry in each block.
 		for (int j = 0; j < DIRENTS_PER_BLOCK; j++) {
-			struct dir_entry *dir = blk->dirents + j;
+			struct dir_entry *dir = &blk.dirents[j];
 
 			// Checking that the dirtory entry found is valid.
 			if (dir->is_valid){
@@ -856,7 +853,6 @@ static int refs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 						// Using filler function to add the path names to the buffer.
 						if (filler(buf, dir->path, &info, num + 1)) {
 							free(appendedFilename);
-							free(blk);
 							return 0;
 						}
 
@@ -867,7 +863,7 @@ static int refs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 				}
 		}
 	}
-	free(blk);
+
 	return 0;
 }
 
@@ -900,10 +896,10 @@ static void ext_read_blocks(char *buf, int numBlocks, off_t start, struct refs_i
 		for (int i = startIndirect; i < startIndirect + numBlocks; i++) {
 			int indirectBlock = i / BLOCKS_PER_BLOCK;
 			int offsetIndirect = i % BLOCKS_PER_BLOCK;
-			
+
 			lba_t *lbas = (lba_t*) *(ino->block_ptrs + NUM_DIRECT + indirectBlock);
 			read_blocks(buf, 1, lbas[offsetIndirect]);
-			
+
 			buf += BLOCK_SIZE;
 		}
 	}
@@ -914,7 +910,7 @@ static void ext_write_blocks(char *buf, int numBlocks, off_t start, struct refs_
 		int endDirect = min(start + numBlocks - 1, NUM_DIRECT - 1);
 		write_blocks(buf, endDirect - start + 1, ino->block_ptrs[start]);
 		int numWriteDirect = NUM_DIRECT - start + 1;
-		
+
 		// offsetting start, numBlocks, and buf to make code easier
 		numBlocks -= numWriteDirect;
 		start = NUM_DIRECT;
@@ -925,19 +921,19 @@ static void ext_write_blocks(char *buf, int numBlocks, off_t start, struct refs_
 		for (int i = startIndirect; i < startIndirect + numBlocks; i++) {
 			int indirectBlock = i / BLOCKS_PER_BLOCK;
 			int offsetIndirect = i % BLOCKS_PER_BLOCK;
-			
+
 			lba_t *lbas = (lba_t*) *(ino->block_ptrs + NUM_DIRECT + indirectBlock);
 			write_blocks(buf, 1, lbas[offsetIndirect]);
-			
+
 			buf += BLOCK_SIZE;
 		}
 	}
 }
 
 static void ext_reserve_data_block(struct refs_inode *ino) {
-	
+
 	int numBlocks = ino->blocks;
-	
+
 	if (numBlocks < NUM_DIRECT) {
 		ino->block_ptrs[numBlocks] = reserve_data_block();
 		ino->blocks++;
@@ -947,14 +943,14 @@ static void ext_reserve_data_block(struct refs_inode *ino) {
 	int indirectOffset = (numBlocks - NUM_DIRECT) / (BLOCK_SIZE / sizeof(lba_t));
 	int blockNum = (numBlocks - NUM_DIRECT) % (BLOCK_SIZE / sizeof(lba_t));
 	assert(indirectOffset < NUM_INDIRECT);
-	
+
 	if (blockNum == 0) {
 		ino->block_ptrs[NUM_DIRECT + indirectOffset] = reserve_data_block();
 	}
-	
+
 	lba_t *lbas = (lba_t*) *(ino->block_ptrs + NUM_DIRECT + indirectOffset);
 	lbas[blockNum] = reserve_data_block();
-	
+
 	ino->blocks++;
 
 }
@@ -984,18 +980,18 @@ static int refs_truncate(const char *path, off_t size) {
 	}
 
 	ino = (struct refs_inode *) &(inode_table[inum]).inode;
-	
+
 	if (ino->size == size) {
 		return 0;
 	}
-	
+
 	if (ino->size < size) {
 		int firstBlock = ino->size / BLOCK_SIZE;
 		int lastBlock = (size - 1) / BLOCK_SIZE;
 
 		int byteOffsetBegin = ino->size % BLOCK_SIZE;
 		int byteOffsetEnd = (size - 1) % BLOCK_SIZE + 1;
-		
+
 		if (byteOffsetBegin == 0) {
 			ext_release_data_block(ino);
 		}
@@ -1009,82 +1005,82 @@ static int refs_truncate(const char *path, off_t size) {
 
 			free(block);
 		} else {
-		
+
 			char *blockBegin = malloc(sizeof(char) * BLOCK_SIZE);
 			char *blockEnd = malloc(sizeof(char) * BLOCK_SIZE);
 
 			ext_read_blocks(blockBegin, 1, firstBlock, ino);
 			fill(blockBegin, byteOffsetBegin, BLOCK_SIZE - 1, 0);
 			ext_write_blocks(blockBegin, 1, firstBlock, ino);
-			
+
 			int numMiddleBlocks = lastBlock - firstBlock + 1;
 			for (int i = 0; i < numMiddleBlocks; i++) {
 				char *middleBlock = malloc(sizeof(char) * (BLOCK_SIZE));
-				
+
 				ext_reserve_data_block(ino);
-				
+
 				// ext_read_blocks(middleBlock, 1, firstBlock + i + 1, ino);
 				fill(middleBlock, 0, BLOCK_SIZE - 1, 0);
 				ext_write_blocks(middleBlock, 1, firstBlock + i + 1, ino);
-				
+
 				free(middleBlock);
 			}
-			
+
 			ext_reserve_data_block(ino);
-			
+
 			ext_read_blocks(blockEnd, 1, lastBlock, ino);
 			fill(blockEnd, 0, byteOffsetEnd - 1, 0);
 			ext_write_blocks(blockEnd, 1, lastBlock, ino);
-			
+
 			free(blockBegin);
 			free(blockEnd);
 		}
 	} else {
 		int firstBlock = size / BLOCK_SIZE;
 		int lastBlock = (ino->size - 1) / BLOCK_SIZE;
-		
+
 		int byteOffsetBegin = size % BLOCK_SIZE;
 		int byteOffsetEnd = (ino->size - 1) % BLOCK_SIZE + 1;
-		
+
 		if (byteOffsetBegin == 0) {
 			ext_release_data_block(ino);
 		}
-		
+
 		if (firstBlock == lastBlock) {
 			char *block = malloc(sizeof(char) * BLOCK_SIZE);
-			
+
 			ext_read_blocks(block, 1, firstBlock, ino);
 			fill(block, byteOffsetBegin, byteOffsetEnd - 1, 0);
 			ext_write_blocks(block, 1, firstBlock, ino);
-			
+
 			free(block);
 		} else {
 			char *blockBegin = malloc(sizeof(char) * BLOCK_SIZE);
 			char *blockEnd = malloc(sizeof(char) * BLOCK_SIZE);
-			
+
 			ext_read_blocks(blockBegin, 1, firstBlock, ino);
 			fill(blockBegin, byteOffsetBegin, BLOCK_SIZE - 1, 0);
 			ext_write_blocks(blockBegin, 1, firstBlock, ino);
-			
+
 			int numMiddleBlocks = lastBlock - firstBlock + 1;
 			for (int i = 0; i < numMiddleBlocks; i++) {
 				char *middleBlock = malloc(sizeof(char) * (BLOCK_SIZE));
-				
+
 				ext_release_data_block(ino);
-				
+
 				// ext_read_blocks(middleBlock, 1, firstBlock + i + 1, ino);
 				fill(middleBlock, 0, BLOCK_SIZE - 1, 0);
 				ext_write_blocks(middleBlock, 1, firstBlock + i + 1, ino);
-				
+
 				free(middleBlock);
 			}
-			
+
 			ext_release_data_block(ino);
-			
+
 			ext_read_blocks(blockEnd, 1, lastBlock, ino);
 			fill(blockEnd, 0, byteOffsetEnd - 1, 0);
 			ext_write_blocks(blockEnd, 1, lastBlock, ino);
-			
+
 			free(blockBegin);
 			free(blockEnd);
 		}
@@ -1113,22 +1109,22 @@ static int refs_write(const char *path, const char *buf, size_t size,
 	ret = get_path_inum((char *) path, &inum);
 
 	// Case where inodes doesn't exist for the parent path.
-	if (ret == -1) {
+	if (ret) {
 		return ret;
 	}
 
 	ino = (struct refs_inode *) &(inode_table[inum]).inode;
-	
+
 	if (size + offset >= ino->size) {
 		refs_truncate(path, size + offset);
 	}
-	
+
 	int firstBlock = offset / BLOCK_SIZE;
 	int lastBlock = (ino->size - 1) / BLOCK_SIZE;
 
 	int byteOffsetBegin = offset % BLOCK_SIZE;
 	int byteOffsetEnd = (ino->size - 1) % BLOCK_SIZE + 1;
-	
+
 	if (firstBlock == lastBlock) {
 		char *block = malloc(sizeof(char) * BLOCK_SIZE);
 
@@ -1139,32 +1135,32 @@ static int refs_write(const char *path, const char *buf, size_t size,
 		free(block);
 	} else {
 		int currentBufOffset = 0;
-		
+
 		char *blockBegin = malloc(sizeof(char) * BLOCK_SIZE);
 		char *blockEnd = malloc(sizeof(char) * BLOCK_SIZE);
 
 		ext_read_blocks(blockBegin, 1, firstBlock, ino);
 		strncpy(blockBegin + byteOffsetBegin, buf, BLOCK_SIZE - byteOffsetBegin);
 		ext_write_blocks(blockBegin, 1, firstBlock, ino);
-		
+
 		currentBufOffset = BLOCK_SIZE - byteOffsetBegin;
-		
+
 		int numMiddleBlocks = lastBlock - firstBlock + 1;
 		for (int i = 0; i < numMiddleBlocks; i++) {
 			char *middleBlock = malloc(sizeof(char) * (BLOCK_SIZE));
-			
+
 			strncpy(middleBlock, buf + currentBufOffset, BLOCK_SIZE);
 			ext_write_blocks(middleBlock, 1, firstBlock + i + 1, ino);
-			
+
 			free(middleBlock);
 			currentBufOffset += BLOCK_SIZE;
 		}
-		
-		
+
+
 		ext_read_blocks(blockEnd, 1, lastBlock, ino);
 		strncpy(blockEnd, buf + currentBufOffset, byteOffsetEnd);
 		ext_write_blocks(blockEnd, 1, lastBlock, ino);
-		
+
 		free(blockBegin);
 		free(blockEnd);
 	}
@@ -1178,15 +1174,18 @@ static int refs_write(const char *path, const char *buf, size_t size,
 static int dir_is_empty(struct refs_inode *dir){
 	union directory_block data;
 
+	// Iterating through each block in the directory.
 	for (int i = 0; i < dir->blocks; i++){
 		read_block(&data, dir->block_ptrs[i]);
 
 		int n = 0;
 
+		// Skipping first two entries containing '.' and '..'.
 		if(i == 0){
 			n = 2;
 		}
 
+		// Searching for any valid entries.
 		while(n < DIRENTS_PER_BLOCK){
 				if(data.dirents[n].is_valid){
 						return 0;
@@ -1195,11 +1194,15 @@ static int dir_is_empty(struct refs_inode *dir){
 		}
 	}
 
+	// No valid entries found, implying that the directory is empty.
 	return 1;
 }
 
+/*
+// Given a parent inode, a child inode, and a path, removes the correpsponding
+// entry in the parent inode for that child, and then updates both inodes.
+*/
 static int remove_child(struct refs_inode *parent, struct refs_inode * child, char * path){
-	int ret = 0;
 
 	char * dup = strdup(path);
 
@@ -1207,44 +1210,32 @@ static int remove_child(struct refs_inode *parent, struct refs_inode * child, ch
 		return -ENOMEM;
 	}
 
+	// Getting the chlid path.
 	char * base = basename(dup);
 
-	union directory_block * current = malloc_blocks(1);
+	union directory_block current;
+	bzero(&current, BLOCK_SIZE);
 
-	if(current == NULL){
-		free(dup);
-		return -ENOMEM;
-	}
-
-	bzero(current, BLOCK_SIZE);
-
+	// Searching through each of the blocks in the parent directory.
 	for(int i = 0; i < parent->blocks; i++){
-		ret = read_block(current, parent->block_ptrs[i]);
+		read_block(&current, parent->block_ptrs[i]);
 
-		if(ret != 1){
-			free(dup);
-			free(current);
-			return -EIO;
-		}
-
+		// Searching through each entry in a block for the specified path.
 		for(int n = 0; n < DIRENTS_PER_BLOCK; n++){
-			if(current->dirents[n].is_valid &&
-					(strcmp(base, current->dirents[n].path) == 0)){
 
-				current->dirents[n].is_valid = 0;
+			// Case where we found the entry to be removed.
+			if(current.dirents[n].is_valid &&
+					(strcmp(base, current.dirents[n].path) == 0)){
 
-				ret = write_block(current, parent->block_ptrs[i]);
+				// Invalidating the entry in the parent.
+				current.dirents[n].is_valid = 0;
+				write_block(&current, parent->block_ptrs[i]);
 
-				free(current);
 				free(dup);
 
-				if (ret != 1){
-					return -EIO;
-				}
-
+				// Updating both inodes link count.
 				parent->n_links--;
 				write_inode(parent->inum);
-
 				child->n_links--;
 				write_inode(child->inum);
 
@@ -1252,8 +1243,18 @@ static int remove_child(struct refs_inode *parent, struct refs_inode * child, ch
 			}
 		}
 	}
+
+	// Case where child path isn't found.
+	free(dup);
+	return -ENOENT;
 }
 
+/*
+// Given a path to a directory, and the inode numbers for the both the
+// directory and its parent, this function removes the directory from the filename
+// system if the directory is empty. Returns 0 on success. Otherwise returns
+// the appropriate error code.
+*/
 static int do_rmdir(char * path, int parentInum, int childInum){
 
 	struct refs_inode * parentInode = &inode_table[parentInum].inode;
@@ -1271,19 +1272,29 @@ static int do_rmdir(char * path, int parentInum, int childInum){
 		return ret;
 	}
 
+	// Updating the inode bitmap to remove the directory.
 	clear_bit(inode_bitmap, childInum);
 
+	// Updating the data bitmap to free the data used by the directory.
 	for(int i = 0; i < childInode->blocks; i++){
 			clear_bit(data_bitmap, childInode->block_ptrs[i] - super.super.d_region_start);
 	}
 
 	childInode->n_links = 0;
 
+	// Storing each change to our 'filesystem'.
 	release_inode(childInode);
+	sync_data_bitmap();
+	sync_inode_bitmap();
+	write_inode(childInum);
+
 	return 0;
 }
 
-
+/*
+// Given a path, this function removes the directory at the end of the path.
+// Returns 0 on success. Otherwise returns the appropriate error code.
+*/
 static int refs_rmdir(const char * path){
 	int ret = 0;
 	int parentInum = 0;
@@ -1295,12 +1306,10 @@ static int refs_rmdir(const char * path){
 		return ret;
 	}
 
-
-
 	// Checking to make sure target directory exists.
 	struct refs_inode * parentInode = &inode_table[parentInum].inode;
-	childInum = find_child_inum_abspath((char *) path, parentInode);
-	if(childInum == -1){
+	ret = find_child_inum_abspath((char *) path, parentInode, &childInum);
+	if(ret){
 		return -ENOENT;
 	}
 
@@ -1310,13 +1319,20 @@ static int refs_rmdir(const char * path){
 		return -ENOTDIR;
 	}
 
-
 	return do_rmdir((char *) path, parentInum, childInum);
 }
 
+
+/*
+// This function creates a file at the specified path location.
+// Returns zero on success. Otherwise returns the appropriate error code.
+*/
 static int refs_mknod(const char * path, mode_t mode, dev_t dev){
-	char * dup = malloc(sizeof(char) * strlen(path));
-	strcpy(dup, path);
+	char * dup = strdup(path);
+
+	if(dup == NULL){
+		return -ENOMEM;
+	}
 
 	char * temp = dirname(dup);
 
@@ -1349,16 +1365,19 @@ static int refs_mknod(const char * path, mode_t mode, dev_t dev){
 		return -ENAMETOOLONG;
 	}
 
+	int childInum = 0;
 	// Checking to see if the directory file already exists.
-	if(find_child_inum(childPath, parent) != -1){
+
+	ret = find_child_inum(childPath, parent, &childInum);
+	if(ret == 0){
 		free(dup);
 		return -EEXIST;
 	}
 
 	// Reserving space for the new directory.
-	int childInum = reserve_regfile_inode();
+	childInum = reserve_regfile_inode();
 
-	// update the inode's direct pointer to point to itself.
+	// update the inode's values.
 	inode_table[childInum].inode.size = 0;
 	inode_table[childInum].inode.blocks = 0;
 	inode_table[childInum].inode.mode = mode;
@@ -1367,6 +1386,7 @@ static int refs_mknod(const char * path, mode_t mode, dev_t dev){
 	write_inode(childInum);
 	sync_inode_bitmap();
 
+	// Adding the new file to the parent directories inode.
 	ret = update_parent_inode(childInum, parentInum, childPath);
 
 	free(dup);
@@ -1376,11 +1396,11 @@ static int refs_mknod(const char * path, mode_t mode, dev_t dev){
 
 
 /*
-
-
- */
+// This function used mknod to create a file at the location specified by path.
+// Returns 0 on success. Otherwise returns the appropriate error code.
+*/
 int static refs_create(const char * path, mode_t mode, struct fuse_file_info * file){
-	return refs_mknod(path, mode | S_IFREG, 0);
+	return refs_mknod(path, mode, 0);
 }
 
 
@@ -1399,7 +1419,7 @@ static int refs_open(const char* path, struct fuse_file_info* fi) {
 	if ((fi->flags & O_RDWR) == O_RDWR)
 		req_mode |= R_OK | W_OK;
 
-	return access(path, req_mode);
+	return refs_access(path, req_mode);
 }
 
 /*
@@ -1412,6 +1432,166 @@ static int refs_release(const char* path, struct fuse_file_info *fi) {
 }
 
 
+/*
+// Helper function to unlink a file from a directory. Returns 0 on success.
+// Otherwise return the appropriate error code.
+*/
+static int do_unlink(char * path, int parentInum, int childInum){
+	struct refs_inode * parentInode = &inode_table[parentInum].inode;
+	struct refs_inode * childInode = &inode_table[childInum].inode;
+
+	// Removing the child from the parent directory
+	int ret = remove_child(parentInode, childInode, path);
+
+	// Error case
+	if(ret){
+		return ret;
+	}
+
+	// Checking to make sure the number of links for the file is now zero.
+	if(childInode->n_links == 0){
+		clear_bit(inode_bitmap, childInum);
+
+		// Computing the number of indirect blocks the file has.
+		int numIndirect;
+		if(childInode->blocks <= NUM_DIRECT){
+			numIndirect = 0;
+		} else {
+			 numIndirect = (childInode->blocks - NUM_DIRECT)/NUM_INDIRECT_POINTERS + 1;
+		}
+
+		lba_t * blk = malloc_blocks(1);
+
+		for(int i = 0; i < childInode->blocks; i++){
+				// Case where we are considering a direct block.
+				if(i < NUM_DIRECT){
+					clear_bit(data_bitmap, childInode->block_ptrs[i] - super.super.d_region_start);
+				} else {
+					// Case where we are considering an indirect block.
+					int index = (i - NUM_DIRECT) % NUM_INDIRECT_POINTERS;
+					read_block(blk,childInode->block_ptrs[NUM_DIRECT+index]);
+
+					// Finding the number of valid block pointers within the indirect block
+					int min = childInode->blocks - i;
+					if(NUM_INDIRECT_POINTERS < min){
+						min = NUM_INDIRECT_POINTERS;
+					}
+
+					// Clearing the bits for each of the blocks within the indirect block
+					int offset = 0;
+					while(offset < min){
+						lba_t temp = (lba_t) (blk + offset);
+						clear_bit(data_bitmap, temp - super.super.d_region_start);
+					}
+
+				}
+		}
+
+		free(blk);
+
+		// Clearing the bits for the indirect blocks.
+		for(int i = 0; i < numIndirect; i++){
+			clear_bit(data_bitmap, childInode->block_ptrs[i+NUM_DIRECT] - super.super.d_region_start);
+		}
+
+		// Saving changes to the filesystem.
+		release_inode(childInode);
+		sync_data_bitmap();
+		sync_inode_bitmap();
+		write_inode(childInum);
+	}
+	return 0;
+}
+
+
+/*
+// This function unlinks a file from a parent directory. If the file
+// then has no links, it is then also deleted. Returns 0 on success.
+// Otherwise returns the appropriate error code.
+*/
+static int refs_unlink(const char * path){
+	int ret = 0;
+	int parentInum = 0;
+	int childInum = 0;
+
+	// Checking to make sure filesystem can reach the parent directory.
+	ret = get_parent_inum((char *) path, &parentInum);
+	if(ret != 0){
+		return ret;
+	}
+
+	// Checking to make sure target file exists.
+	struct refs_inode * parentInode = &inode_table[parentInum].inode;
+	ret = find_child_inum_abspath((char *) path, parentInode, &childInum);
+	if(ret){
+		return -ENOENT;
+	}
+
+	// Checking to make sure path refers to a file.
+	struct refs_inode *file_inode = &inode_table[childInum].inode;
+	if (!(file_inode->flags & INODE_TYPE_REG)) {
+		return -EISDIR;
+	}
+
+	return do_unlink((char *) path, parentInum, childInum);
+}
+
+/*
+// Just using the getattr function to perform fgetattr.
+*/
+static int refs_fgetattr(const char * path, struct stat* stbuf, struct fuse_file_info *fi){
+	return refs_getattr(path, stbuf);
+}
+
+
+static int do_read(int childInum, char * buf, size_t size, off_t offset){
+		struct refs_inode *file_inode = &inode_table[childInum].inode;
+
+		if(file_inode->size < offset){
+			return 0;
+		}
+}
+
+/*
+// Reads the contents of a file starting at some offset, and for some size.
+// The read part of the file will be stored in the character buffer buf.
+// Returns 0 on succes. Otherwise returns the appropriate error code.
+*/
+static int refs_read(const char * path, char * buf, size_t size, off_t offset,
+ 	struct fuse_file_info* fi){
+
+		int ret = 0;
+		int parentInum = 0;
+		int childInum = 0;
+
+		// Checking to make sure filesystem can reach the parent directory.
+		ret = get_parent_inum((char *) path, &parentInum);
+		if(ret != 0){
+			return ret;
+		}
+
+		// Checking to make sure target file exists.
+		struct refs_inode * parentInode = &inode_table[parentInum].inode;
+		ret = find_child_inum_abspath((char *) path, parentInode, &childInum);
+		if(ret){
+			return -ENOENT;
+		}
+
+		// Checking to make sure path refers to a file.
+		struct refs_inode *file_inode = &inode_table[childInum].inode;
+		if (!(file_inode->flags & INODE_TYPE_REG)) {
+			return -EISDIR;
+		}
+
+		// Checking to make sure we can read the file.
+		if(access(path, R_OK)){
+			return -EACCES;
+		}
+
+		return do_read(childInum, buf, size, offset);
+}
+
+
 // You should implement the functions that you need, but do so in a
 // way that lets you incrementally test.
 static struct fuse_operations refs_operations = {
@@ -1421,32 +1601,26 @@ static struct fuse_operations refs_operations = {
 	.access = refs_access,
 	.mkdir = refs_mkdir,
 	.readdir	= refs_readdir,
-	.truncate	= refs_truncate
+	.truncate	= refs_truncate,
 	.mknod = refs_mknod,
 	.create = refs_create,
 	.release = refs_release,
 	.open = refs_open,
 	.rmdir = refs_rmdir,
 	.write		= refs_write,
-/*
-	.fgetattr	= NULL,
-	.access		= NULL,
+	.unlink = refs_unlink,
+	.fgetattr	= refs_fgetattr,
+	.read = refs_read
+	/*
 	.readlink	= NULL,
-	.mknod		= NULL,
-	.create		= NULL,
-	.mkdir		= NULL,
 	.symlink	= NULL,
-	.unlink		= NULL,
-	.rmdir		= NULL,
 	.rename		= NULL,
 	.link		= NULL,
 	.chmod		= NULL,
 	.chown		= NULL,
 	.utimens	= NULL,
-	.open		= NULL,
 	.read		= NULL,
 	.statfs		= NULL,
-	.release	= NULL,
 	.fsync		= NULL,
 #ifdef HAVE_SETXATTR
 	.setxattr	= NULL,
