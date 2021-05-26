@@ -880,7 +880,10 @@ static int refs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 
 			// Checking that the dirtory entry found is valid.
 			if (dir->is_valid){
-					if(num > offset){
+				//$ I think offset starts at 0, so this may
+				//$ be the reason that "." is missing.
+				//$ if(num > offset){
+				if(num >= offset){
 						int subpathlen = strlen(dir->path);
 
 						char *appendedFilename = malloc(sizeof(char) * (pathlen + subpathlen + 1));
