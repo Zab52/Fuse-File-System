@@ -43,5 +43,4 @@ To run the testing code, run './test-access'.
 
 After testing, then just unmount the file system as described.
 
-(Note, our testing is incomplete since we ran out of time. Will potentially add
-  thorough testing code after due date)
+
